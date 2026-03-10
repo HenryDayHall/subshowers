@@ -40,8 +40,9 @@ class Reader:
         self._check_expected_format()
         self.data = _pd.read_parquet(self._history_path)
         self._length = len(self.data[self.history_columns[0]])
-        root = self.data[self.data["parent_label"] == self.data["label"]].index[0]
-        self.data.at[root, "parent_label"] = -1
+        if -1 not in self.data["parent_label"].unique():
+            root = self.data[self.data["parent_label"] == self.data["label"]].index[0]
+            self.data.at[root, "parent_label"] = -1
 
     def _check_expected_format(self):
         """
@@ -86,7 +87,7 @@ class ShowerStarts:
         """
         Parameters
         ----------
-        data : Reader
+        reader : Reader
             Reader object to read data from
         start_condition : callable
             Function to determine when a subshower starts.
@@ -98,12 +99,13 @@ class ShowerStarts:
         self.reader = reader
         self.start_condition = start_condition
         self.verbose = verbose
-        self._identify_root_starts()
-        self._sort_starts()
+        if start_condition is not None:
+            self._identify_root_starts()
+            self._sort_starts()
 
     def _save_dict(self) -> dict:
         return {
-            "folder": self.data.folder,
+            "folder": self.reader.folder,
             "starts": self._starts,
             "loose_ends": self._loose_ends,
             "root": self._root,
@@ -127,6 +129,16 @@ class ShowerStarts:
         data = self.reader.data
         root = data.index[data["parent_label"] == -1][0]
         self._root = data["label"][root]
+        root_values = data.loc[root]
+        if self.start_condition(**root_values):
+            self._starts = _pd.Index([root])
+            self._loose_ends = _pd.Index([])
+            _warnings.warn(
+                "The root particle is also a start particle,"
+                " therefore the subshower may not be representative.",
+                UserWarning,
+            )
+            return
         self._starts = []
         self._loose_ends = []
         stack = [root]
@@ -164,16 +176,10 @@ class ShowerStarts:
                 f"with {len(self._starts)} starts.",
                 UserWarning,
             )
-        if root in self._starts:
-            _warnings.warn(
-                "The root particle is also a start particle,"
-                " therefore the subshower may not be representative.",
-                UserWarning,
-            )
 
     def _sort_starts(self):
-        kinetic_energy = self.reader.at[self._starts, "kinetic_energy"]
-        self._starts = self._starts.sort_values(kinetic_energy)
+        kinetic_energy = self.reader.data["kinetic_energy"][self._starts]
+        self._starts = self._starts[kinetic_energy.argsort()]
 
     def __len__(self) -> int:
         """
@@ -192,10 +198,7 @@ class ShowerStarts:
         """
         Return the data of leaf particles with no valid subshower
         """
-        with self.reader as data:
-            if index is None:
-                return data.loc[self._loose_ends]
-            return self._loose_ends[index]
+        return self._loose_ends
 
 
 def get_subshower(data, start_index: int, leaves_only: bool = True) -> list:
@@ -208,9 +211,9 @@ def get_subshower(data, start_index: int, leaves_only: bool = True) -> list:
     while stack:
         parent = stack.pop()
         child_indices = data.index[data["parent_label"] == data.at[parent, "label"]]
-        if leaves_only and child_indices.empty:
+        if child_indices.empty:
             subshower.append(parent)
-        else:
+        elif not leaves_only:
             subshower.append(parent)
         stack += list(child_indices)
     return subshower
@@ -244,8 +247,9 @@ class Subshowers:
 
     def _save_dict(self) -> dict:
         flat_starts = [
-            [start] * len(subshower)
+            start
             for start, subshower in zip(self.showerstarts, self.subshowers)
+            for _ in subshower
         ]
         flat_subshowers = sum(self.subshowers, [])
         return {
@@ -256,7 +260,7 @@ class Subshowers:
         }
 
     @classmethod
-    def _load_dict(dictionary: dict):
+    def _load_dict(cls, dictionary: dict):
         reader = Reader(dictionary["folder"])
         new = Subshowers(reader, dictionary["leaves_only"])
         flat_starts = dictionary["starts"]
