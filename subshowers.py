@@ -220,6 +220,10 @@ def get_subshower(data, start_index: int, leaves_only: bool = True) -> list:
 
 
 class Subshowers:
+    """
+    Locate and retain particles in subshowers given a starting particle.
+    """
+
     def __init__(self, reader: Reader, leaves_only: bool = True, verbose: bool = False):
         self.showerstarts = []
         self.subshowers = []
@@ -273,6 +277,10 @@ class Subshowers:
 
 
 class Output:
+    """
+    Read and write both shower starts and subshowers, along with metadata
+    """
+
     SHOWER_STARTS_PREFIX = "starts"
     SUBSHOWERS_PREFIX = "subshowers"
     METADATA_PREFIX = "metadata"
@@ -291,10 +299,12 @@ class Output:
             df = _pd.DataFrame.from_dict({key: value})
             to_save[f"{self.SHOWER_STARTS_PREFIX}_{key}"] = df
         subshowers_dict = self.subshowers._save_dict()
-        df = _pd.DataFrame.from_dict({
-            "starts": subshowers_dict["starts"],
-            "subshowers": subshowers_dict["subshowers"],
-        })
+        df = _pd.DataFrame.from_dict(
+            {
+                "starts": subshowers_dict["starts"],
+                "subshowers": subshowers_dict["subshowers"],
+            }
+        )
         to_save[f"{self.SUBSHOWERS_PREFIX}"] = df
         for key in ["folder", "leaves_only"]:
             df = _pd.DataFrame.from_dict({key: [subshowers_dict[key]]})
@@ -309,21 +319,27 @@ class Output:
         shower_starts_dict = {}
         for key in loaded:
             if key.startswith(cls.SHOWER_STARTS_PREFIX):
-                tail = key[len(cls.SHOWER_STARTS_PREFIX) + 1:]
-                shower_starts_dict[tail] = loaded[key][tail]
+                tail = key[len(cls.SHOWER_STARTS_PREFIX) + 1 :]
+                value = loaded[key][tail]
+                if tail in ["folder", "root"]:
+                    value = value[0]
+                shower_starts_dict[tail] = value
         shower_starts = ShowerStarts._load_dict(shower_starts_dict)
         subshowers_dict = {}
         for tail in ["folder", "leaves_only"]:
             key = f"{cls.SUBSHOWERS_PREFIX}_{tail}"
-            subshowers_dict[tail] = loaded[key][tail]
+            value = loaded[key][tail]
+            if tail in ["leaves_only", "folder"]:
+                value = value[0]
+            subshowers_dict[tail] = value
         subshowers_dict["starts"] = loaded[f"{cls.SUBSHOWERS_PREFIX}"]["starts"]
         subshowers_dict["subshowers"] = loaded[f"{cls.SUBSHOWERS_PREFIX}"]["subshowers"]
         subshowers = Subshowers._load_dict(subshowers_dict)
         metadata = {}
         for key in loaded:
             if key.startswith(cls.METADATA_PREFIX):
-                tail = key[len(cls.METADATA_PREFIX) + 1:]
-                metadata[tail] = loaded[key][tail]
+                tail = key[len(cls.METADATA_PREFIX) + 1 :]
+                metadata[tail] = loaded[key][tail][0]
         new = cls(shower_starts, subshowers, **metadata)
         return new
 
@@ -339,6 +355,5 @@ class Output:
         loaded = {}
         with _pd.HDFStore(path) as store:
             for key in store.keys():
-                loaded[key] = store.get(key)
+                loaded[key.strip("/")] = store.get(key)
         return cls._unpack_dataframes(loaded)
-

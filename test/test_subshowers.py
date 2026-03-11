@@ -44,13 +44,18 @@ def mock_history_dict_2():
     return history_dict
 
 
+def fake_history(folder, history_dict):
+    hist_dir = os.path.join(folder, "history")
+    if not os.path.exists(hist_dir):
+        os.mkdir(hist_dir)
+    history_path = os.path.join(hist_dir, "history.parquet")
+    pd.DataFrame(history_dict).to_parquet(history_path)
+
+
 def test_reader():
     with tempfile.TemporaryDirectory() as tempdir:
-        hist_dir = os.path.join(tempdir, "history")
-        os.mkdir(hist_dir)
         history_dict = mock_history_dict_1()
-        history_path = os.path.join(hist_dir, "history.parquet")
-        pd.DataFrame(history_dict).to_parquet(history_path)
+        fake_history(tempdir, history_dict)
         reader = subshowers.Reader(tempdir)
         assert len(reader) == 1
         for col in subshowers.Reader.history_columns:
@@ -61,7 +66,7 @@ def test_reader():
                 assert reader.data.at[0, col] == -1
 
         history_dict = mock_history_dict_2()
-        pd.DataFrame(history_dict).to_parquet(history_path)
+        fake_history(tempdir, history_dict)
         reader = subshowers.Reader(tempdir)
         assert len(reader) == 4
 
@@ -119,10 +124,7 @@ def test_ShowerStarts():
 
     with tempfile.TemporaryDirectory() as tempdir:
         save_dict["folder"] = tempdir
-        history_folder = os.path.join(tempdir, "history")
-        os.mkdir(history_folder)
-        history_path = os.path.join(history_folder, "history.parquet")
-        mock_reader2.data.to_parquet(history_path)
+        fake_history(tempdir, mock_reader2.data)
         copy_shower_starts = subshowers.ShowerStarts._load_dict(save_dict)
         assert len(copy_shower_starts) == 1
         assert len(copy_shower_starts.get_loose_ends()) == 0
@@ -196,11 +198,8 @@ def test_Subshowers():
     assert save_dict["leaves_only"] == True
 
     with tempfile.TemporaryDirectory() as tempdir:
+        fake_history(tempdir, mock_reader.data)
         save_dict["folder"] = tempdir
-        history_folder = os.path.join(tempdir, "history")
-        os.mkdir(history_folder)
-        history_path = os.path.join(history_folder, "history.parquet")
-        mock_reader.data.to_parquet(history_path)
         copy_subshowers = subshowers.Subshowers._load_dict(save_dict)
         assert len(copy_subshowers) == 0
 
@@ -222,10 +221,7 @@ def test_Subshowers():
 
     with tempfile.TemporaryDirectory() as tempdir:
         save_dict["folder"] = tempdir
-        history_folder = os.path.join(tempdir, "history")
-        os.mkdir(history_folder)
-        history_path = os.path.join(history_folder, "history.parquet")
-        mock_reader.data.to_parquet(history_path)
+        fake_history(tempdir, mock_reader.data)
         copy_subshowers = subshowers.Subshowers._load_dict(save_dict)
     assert len(copy_subshowers) == 2
     assert len(copy_subshowers.showerstarts) == 2
@@ -250,18 +246,23 @@ def test_Subshowers():
 
 
 def test_Output():
-    mock_reader = MockReader(mock_history_dict_2())
-    start_condition = subshowers.energy_cut(100)
-    shower_starts = subshowers.ShowerStarts(mock_reader, start_condition)
-    subshowers1 = subshowers.Subshowers(mock_reader, True)
-    subshowers1.add_subshower([0, 1])
+    with tempfile.TemporaryDirectory() as tempdir:
+        mock_reader = MockReader(mock_history_dict_2())
+        mock_reader.folder = tempdir
 
-    output = subshowers.Output(shower_starts, subshowers1, test="test")
-    assert output.shower_starts == shower_starts
-    assert output.subshowers == subshowers1
-    with tempfile.NamedTemporaryFile(suffix=".h5") as f:
-        output.save(f.name)
-        output2 = subshowers.Output.load(f.name)
+        start_condition = subshowers.energy_cut(100)
+        shower_starts = subshowers.ShowerStarts(mock_reader, start_condition)
+        subshowers1 = subshowers.Subshowers(mock_reader, True)
+        subshowers1.add_subshower([0, 1])
+
+        output = subshowers.Output(shower_starts, subshowers1, test="test")
+        assert output.shower_starts == shower_starts
+        assert output.subshowers == subshowers1
+
+        fake_history(tempdir, mock_reader.data)
+        file_name = os.path.join(tempdir, "output.h5")
+        output.save(file_name)
+        output2 = subshowers.Output.load(file_name)
         new_shower_starts = output2.shower_starts
         new_subshowers = output2.subshowers
         metadata = output2.metadata
@@ -273,7 +274,7 @@ def test_Output():
     loose_ends = new_shower_starts.get_loose_ends()
     assert len(loose_ends) == 0
     save_dict = new_shower_starts._save_dict()
-    assert save_dict["folder"] == "folder.parquet"
+    assert save_dict["folder"] == tempdir
     assert len(save_dict["starts"]) == 1
     assert set(save_dict["starts"]) == {0}
     assert len(save_dict["loose_ends"]) == 0
@@ -283,7 +284,7 @@ def test_Output():
     assert len(new_subshowers) == 2
     assert len(new_subshowers.showerstarts) == 2
     save_dict = new_subshowers._save_dict()
-    assert save_dict["folder"] == "folder.parquet"
+    assert save_dict["folder"] == tempdir
     assert sorted(save_dict["starts"]) == [0, 0, 1]
     assert sorted(save_dict["subshowers"]) == [2, 3, 3]
     assert save_dict["leaves_only"] == True
