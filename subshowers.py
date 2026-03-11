@@ -270,3 +270,75 @@ class Subshowers:
         for start, subshower in zip(flat_starts, flat_subshowers):
             new.subshowers[new.showerstarts.index(start)].append(subshower)
         return new
+
+
+class Output:
+    SHOWER_STARTS_PREFIX = "starts"
+    SUBSHOWERS_PREFIX = "subshowers"
+    METADATA_PREFIX = "metadata"
+
+    def __init__(self, shower_starts: ShowerStarts, subshowers: Subshowers, **metadata):
+        self.shower_starts = shower_starts
+        self.subshowers = subshowers
+        self.metadata = metadata
+
+    def _prep_dataframes(self):
+        to_save = {}
+        shower_starts_dict = self.shower_starts._save_dict()
+        for key, value in shower_starts_dict.items():
+            if key in ["folder", "root"]:
+                value = [value]
+            df = _pd.DataFrame.from_dict({key: value})
+            to_save[f"{self.SHOWER_STARTS_PREFIX}_{key}"] = df
+        subshowers_dict = self.subshowers._save_dict()
+        df = _pd.DataFrame.from_dict({
+            "starts": subshowers_dict["starts"],
+            "subshowers": subshowers_dict["subshowers"],
+        })
+        to_save[f"{self.SUBSHOWERS_PREFIX}"] = df
+        for key in ["folder", "leaves_only"]:
+            df = _pd.DataFrame.from_dict({key: [subshowers_dict[key]]})
+            to_save[f"{self.SUBSHOWERS_PREFIX}_{key}"] = df
+        for key, value in self.metadata.items():
+            df = _pd.DataFrame.from_dict({key: [value]})
+            to_save[f"{self.METADATA_PREFIX}_{key}"] = df
+        return to_save
+
+    @classmethod
+    def _unpack_dataframes(cls, loaded: dict):
+        shower_starts_dict = {}
+        for key in loaded:
+            if key.startswith(cls.SHOWER_STARTS_PREFIX):
+                tail = key[len(cls.SHOWER_STARTS_PREFIX) + 1:]
+                shower_starts_dict[tail] = loaded[key][tail]
+        shower_starts = ShowerStarts._load_dict(shower_starts_dict)
+        subshowers_dict = {}
+        for tail in ["folder", "leaves_only"]:
+            key = f"{cls.SUBSHOWERS_PREFIX}_{tail}"
+            subshowers_dict[tail] = loaded[key][tail]
+        subshowers_dict["starts"] = loaded[f"{cls.SUBSHOWERS_PREFIX}"]["starts"]
+        subshowers_dict["subshowers"] = loaded[f"{cls.SUBSHOWERS_PREFIX}"]["subshowers"]
+        subshowers = Subshowers._load_dict(subshowers_dict)
+        metadata = {}
+        for key in loaded:
+            if key.startswith(cls.METADATA_PREFIX):
+                tail = key[len(cls.METADATA_PREFIX) + 1:]
+                metadata[tail] = loaded[key][tail]
+        new = cls(shower_starts, subshowers, **metadata)
+        return new
+
+    def save(self, path: str):
+        assert path.endswith(".h5"), "Path must end with .h5"
+        to_save = self._prep_dataframes()
+        for key, df in to_save.items():
+            df.to_hdf(path, key=key, mode="a")
+
+    @classmethod
+    def load(cls, path: str):
+        assert path.endswith(".h5"), "Path must end with .h5"
+        loaded = {}
+        with _pd.HDFStore(path) as store:
+            for key in store.keys():
+                loaded[key] = store.get(key)
+        return cls._unpack_dataframes(loaded)
+

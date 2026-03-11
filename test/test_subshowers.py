@@ -249,4 +249,41 @@ def test_Subshowers():
             assert False
 
 
+def test_Output():
+    mock_reader = MockReader(mock_history_dict_2())
+    start_condition = subshowers.energy_cut(100)
+    shower_starts = subshowers.ShowerStarts(mock_reader, start_condition)
+    subshowers1 = subshowers.Subshowers(mock_reader, True)
+    subshowers1.add_subshower([0, 1])
 
+    output = subshowers.Output(shower_starts, subshowers1, test="test")
+    assert output.shower_starts == shower_starts
+    assert output.subshowers == subshowers1
+    with tempfile.NamedTemporaryFile(suffix=".h5") as f:
+        output.save(f.name)
+        output2 = subshowers.Output.load(f.name)
+        new_shower_starts = output2.shower_starts
+        new_subshowers = output2.subshowers
+        metadata = output2.metadata
+
+    assert metadata["test"] == "test"
+
+    # check shower starts saved and loaded correctly
+    assert len(new_shower_starts) == 1
+    loose_ends = new_shower_starts.get_loose_ends()
+    assert len(loose_ends) == 0
+    save_dict = new_shower_starts._save_dict()
+    assert save_dict["folder"] == "folder.parquet"
+    assert len(save_dict["starts"]) == 1
+    assert set(save_dict["starts"]) == {0}
+    assert len(save_dict["loose_ends"]) == 0
+    assert save_dict["root"] == 0
+
+    # check subshowers saved and loaded correctly
+    assert len(new_subshowers) == 2
+    assert len(new_subshowers.showerstarts) == 2
+    save_dict = new_subshowers._save_dict()
+    assert save_dict["folder"] == "folder.parquet"
+    assert sorted(save_dict["starts"]) == [0, 0, 1]
+    assert sorted(save_dict["subshowers"]) == [2, 3, 3]
+    assert save_dict["leaves_only"] == True
