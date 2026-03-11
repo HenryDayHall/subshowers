@@ -2,7 +2,7 @@
 TODO currently, this assumes that all folders contain a single shower.
 May need to alter that.
 """
-
+import sys as _sys
 import os as _os
 import warnings as _warnings
 import pandas as _pd
@@ -146,9 +146,9 @@ class ShowerStarts:
         while stack:
             i += 1
             if i % 1000 == 0 and self.verbose:
-                fraction = i / len(self.data)
+                fraction = i / len(self.reader)
                 print(
-                    f"Processed {fraction:.1%} of total particles."
+                    f"Processed {fraction:00.1%} of total particles."
                     f" Found {len(self._starts)} starts.",
                     end="\r",
                 )
@@ -163,7 +163,7 @@ class ShowerStarts:
             self._starts += list(child_indices[is_start])
             stack += list(child_indices[~is_start])
         if self.verbose:
-            fraction = i / len(self.data)
+            fraction = i / len(self.reader)
             print(
                 f"Found all {len(self._starts)} starts after "
                 f"processing {fraction:.1%} of total particles"
@@ -235,9 +235,16 @@ class Subshowers:
         return len(self.showerstarts)
 
     def add_subshower(self, start_index: list | _pd.Index):
-        for start in start_index:
+        n_to_add = len(start_index)
+        for i, start in enumerate(start_index):
             if start in self.showerstarts:
                 continue
+            if self.verbose:
+                fraction = i / n_to_add
+                print(
+                    f"Processed {fraction:00.1%} of total starts.",
+                    end="\r",
+                )
             subshower = get_subshower(self.reader.data, start, self.leaves_only)
             self.subshowers.append(subshower)
             self.showerstarts.append(start)
@@ -357,3 +364,44 @@ class Output:
             for key in store.keys():
                 loaded[key.strip("/")] = store.get(key)
         return cls._unpack_dataframes(loaded)
+
+
+def run(
+    folder: str,
+    energy_cut_value: float = 1000,
+    leaves_only: bool = False,
+    output_path: str = None,
+    overwrite: bool = False,
+    verbose: bool = False,
+):
+    if output_path is None:
+        output_path = _os.path.join(folder, "subshowers.h5")
+    if not overwrite and _os.path.exists(output_path):
+        if verbose:
+            print(f"{output_path} already exists. Skipping.")
+        _os.remove(output_path)
+    reader = Reader(folder)
+    start_condition = energy_cut(energy_cut_value)
+    shower_starts = ShowerStarts(reader, start_condition, verbose=verbose)
+    subshowers = Subshowers(reader, leaves_only, verbose=verbose)
+    subshowers.add_subshower(shower_starts)
+    output = Output(
+        shower_starts, subshowers, energy_cut=energy_cut_value, leaves_only=leaves_only
+    )
+    output.save(output_path)
+    if verbose:
+        print(f"Saved to {output_path}")
+
+
+if __name__ == "__main__":
+    if len(_sys.argv) < 3:
+        print("Usage: python subshowers.py folder energy_cut_value")
+    else:
+        folder = _sys.argv[1]
+        energy_cut_value = float(_sys.argv[2])
+        if len(_sys.argv) > 3:
+            output_path = _sys.argv[3]
+        else:
+            output_path = None
+        run(folder, energy_cut_value, output_path=output_path, verbose=True)
+
