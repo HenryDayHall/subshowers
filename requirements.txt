@@ -2,3 +2,4 @@ pandas > 3
 pytables
 pyarrow
 plotly
+scikit-image  # for skimage.draw.line
