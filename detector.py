@@ -12,21 +12,20 @@ def sign_of_volume(a, b, c, d):
 
 def intersects_triangle(point1, point2, triangle):
     sign_1 = sign_of_volume(
-        point1, triangle[..., 0], triangle[..., 1], triangle[..., 2]
+            point1, triangle[..., 0, :], triangle[..., 1, :], triangle[..., 2, :]
     )
     sign_2 = sign_of_volume(
-        point2, triangle[..., 0], triangle[..., 1], triangle[..., 2]
+            point2, triangle[..., 0, :], triangle[..., 1, :], triangle[..., 2, :]
     )
 
     requirement_1 = sign_1 != sign_2
 
-    sign_3 = sign_of_volume(point1, point2, triangle[..., 0], triangle[..., 1])
-    sign_4 = sign_of_volume(point1, point2, triangle[..., 1], triangle[..., 2])
+    sign_3 = sign_of_volume(point1, point2, triangle[..., 0, :], triangle[..., 1, :])
+    sign_4 = sign_of_volume(point1, point2, triangle[..., 1, :], triangle[..., 2, :])
 
     requirement_2 = sign_3 == sign_4
 
-    sign_5 = sign_of_volume(point1, point2, triangle[..., 2], triangle[..., 0])
-
+    sign_5 = sign_of_volume(point1, point2, triangle[..., 2, :], triangle[..., 0, :])
     requirement_3 = sign_5 == sign_4
 
     return requirement_1 & requirement_2 & requirement_3
@@ -80,7 +79,7 @@ class Triangles:
         normed_directions = directions / np.sum(directions, axis=-1, keepdims=True)
         # dimensions like (M, N, 3)
         point_beyond = (
-            start_positions + normed_directions * distance_to_centers[:, :, None] * 2
+            start_positions - normed_directions * distance_to_centers[:, :, None] * 2
         )
         # dimensions like (M, N)
         intersects = intersects_triangle(
@@ -118,7 +117,7 @@ def generate_at_ground(
 
 def get_perpendiculars(vector_3d):
     normed = vector_3d / np.linalg.norm(vector_3d)
-    if normed[2] == 1:
+    if np.abs(normed[2]) == 1:
         one_perpendicular = np.array([1, 0, 0])
         two_perpendicular = np.array([0, 1, 0])
     else:
@@ -169,7 +168,6 @@ def grid_positions(
     return hit_a_triangle.reshape(bins, bins)
 
 
-# TODO test
 if __name__ == "__main__":
     triangles = generate_at_ground(20)
     grid = grid_positions(triangles)
