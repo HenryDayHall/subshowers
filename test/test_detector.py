@@ -28,7 +28,6 @@ def test_intersects_triangle():
     triangle[:, 0] += 10
     assert not detector.intersects_triangle(point_1, point_2, triangle)
 
-
     point_1 = np.array([-10, -10, -10])
     point_2 = np.array([10, 10, 10])
     triangle = np.array([[0, 1, 0], [-1, -1, 0], [1, -1, 0]])
@@ -49,7 +48,6 @@ def test_get_perpendiculars():
     assert np.dot(perpendicular_1, perpendicular_2) < 1e-5
     assert np.dot(vector_3d, perpendicular_1) < 1e-5
     assert np.dot(vector_3d, perpendicular_2) < 1e-5
-
 
 
 if __name__ == "__main__":
