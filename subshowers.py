@@ -2,65 +2,14 @@
 TODO currently, this assumes that all folders contain a single shower.
 May need to alter that.
 """
+
 import sys as _sys
 import os as _os
 import warnings as _warnings
 import pandas as _pd
 
-
-class Reader:
-    """
-    Read data created by a modified CORSIKA8 from file
-    """
-
-    history_columns = [
-        "shower",
-        "pdg",
-        "px",
-        "py",
-        "pz",
-        "x",
-        "y",
-        "z",
-        "kinetic_energy",
-        "time",
-        "label",
-        "parent_label",
-    ]
-
-    def __init__(self, folder: str):
-        """
-        Parameters
-        ----------
-        folder : str
-            Path to the folder containing the subshowers
-        """
-        self.folder = folder
-        self._history_path = _os.path.join(folder, "history", "history.parquet")
-        self._check_expected_format()
-        self.data = _pd.read_parquet(self._history_path)
-        self._length = len(self.data[self.history_columns[0]])
-        if -1 not in self.data["parent_label"].unique():
-            root = self.data[self.data["parent_label"] == self.data["label"]].index[0]
-            self.data.at[root, "parent_label"] = -1
-
-    def _check_expected_format(self):
-        """
-        Check that the folder given contains the history file with the expected columns
-        """
-        has_history_file = _os.path.exists(self._history_path)
-        if not has_history_file:
-            raise ValueError(f"History file not found at {self._history_path}")
-        columns = _pd.read_parquet(self._history_path).columns
-        not_found = [column for column in self.history_columns if column not in columns]
-        if not_found:
-            raise ValueError(
-                f"history file at {self._history_path}"
-                f" is missing columns: {not_found}"
-            )
-
-    def __len__(self) -> int:
-        return self._length
+from subshowers.showers import Reader as _Reader
+from subshowers import raw_save_load as _raw
 
 
 def energy_cut(energy: float):
@@ -82,7 +31,7 @@ class ShowerStarts:
     """
 
     def __init__(
-        self, reader: Reader, start_condition: callable, verbose: bool = False
+        self, reader: _Reader, start_condition: callable, verbose: bool = False
     ):
         """
         Parameters
@@ -108,12 +57,12 @@ class ShowerStarts:
             "folder": self.reader.folder,
             "starts": self._starts,
             "loose_ends": self._loose_ends,
-            "root": self._root,
+            "root": int(self._root),
         }
 
     @classmethod
     def _load_dict(cls, dictionary: dict, start_condition: callable = None):
-        reader = Reader(dictionary["folder"])
+        reader = _Reader(dictionary["folder"])
         new = cls(reader, start_condition)
         new._starts = dictionary["starts"]
         new._loose_ends = dictionary["loose_ends"]
@@ -224,7 +173,9 @@ class Subshowers:
     Locate and retain particles in subshowers given a starting particle.
     """
 
-    def __init__(self, reader: Reader, leaves_only: bool = True, verbose: bool = False):
+    def __init__(
+        self, reader: _Reader, leaves_only: bool = True, verbose: bool = False
+    ):
         self.showerstarts = []
         self.subshowers = []
         self.reader = reader
@@ -272,7 +223,7 @@ class Subshowers:
 
     @classmethod
     def _load_dict(cls, dictionary: dict):
-        reader = Reader(dictionary["folder"])
+        reader = _Reader(dictionary["folder"])
         new = Subshowers(reader, dictionary["leaves_only"])
         flat_starts = dictionary["starts"]
         flat_subshowers = dictionary["subshowers"]
@@ -297,72 +248,68 @@ class Output:
         self.subshowers = subshowers
         self.metadata = metadata
 
+    @staticmethod
+    def basepath(path):
+        parts = path.split("/")
+        return "/".join(parts[:-2])
+
     def _prep_dataframes(self):
-        to_save = {}
+        common_dict = {}
         shower_starts_dict = self.shower_starts._save_dict()
         for key, value in shower_starts_dict.items():
-            if key in ["folder", "root"]:
-                value = [value]
-            df = _pd.DataFrame.from_dict({key: value})
-            to_save[f"{self.SHOWER_STARTS_PREFIX}_{key}"] = df
+            prefixed_key = f"{self.SHOWER_STARTS_PREFIX}_{key}"
+            common_dict[prefixed_key] = value
         subshowers_dict = self.subshowers._save_dict()
-        df = _pd.DataFrame.from_dict(
-            {
-                "starts": subshowers_dict["starts"],
-                "subshowers": subshowers_dict["subshowers"],
-            }
-        )
-        to_save[f"{self.SUBSHOWERS_PREFIX}"] = df
-        for key in ["folder", "leaves_only"]:
-            df = _pd.DataFrame.from_dict({key: [subshowers_dict[key]]})
-            to_save[f"{self.SUBSHOWERS_PREFIX}_{key}"] = df
+        for key in subshowers_dict:
+            prefixed_key = f"{self.SUBSHOWERS_PREFIX}_{key}"
+            common_dict[prefixed_key] = subshowers_dict[key]
         for key, value in self.metadata.items():
-            df = _pd.DataFrame.from_dict({key: [value]})
-            to_save[f"{self.METADATA_PREFIX}_{key}"] = df
-        return to_save
+            common_dict[f"{self.METADATA_PREFIX}_{key}"] = value
+        return common_dict
 
     @classmethod
     def _unpack_dataframes(cls, loaded: dict):
         shower_starts_dict = {}
-        for key in loaded:
-            if key.startswith(cls.SHOWER_STARTS_PREFIX):
-                tail = key[len(cls.SHOWER_STARTS_PREFIX) + 1 :]
-                value = loaded[key][tail]
-                if tail in ["folder", "root"]:
-                    value = value[0]
-                shower_starts_dict[tail] = value
-        shower_starts = ShowerStarts._load_dict(shower_starts_dict)
         subshowers_dict = {}
-        for tail in ["folder", "leaves_only"]:
-            key = f"{cls.SUBSHOWERS_PREFIX}_{tail}"
-            value = loaded[key][tail]
-            if tail in ["leaves_only", "folder"]:
-                value = value[0]
-            subshowers_dict[tail] = value
-        subshowers_dict["starts"] = loaded[f"{cls.SUBSHOWERS_PREFIX}"]["starts"]
-        subshowers_dict["subshowers"] = loaded[f"{cls.SUBSHOWERS_PREFIX}"]["subshowers"]
-        subshowers = Subshowers._load_dict(subshowers_dict)
         metadata = {}
         for key in loaded:
-            if key.startswith(cls.METADATA_PREFIX):
+            value = loaded[key]
+            if key.startswith(cls.SHOWER_STARTS_PREFIX):
+                tail = key[len(cls.SHOWER_STARTS_PREFIX) + 1 :]
+                shower_starts_dict[tail] = value
+            elif key.startswith(cls.SUBSHOWERS_PREFIX):
+                tail = key[len(cls.SUBSHOWERS_PREFIX) + 1 :]
+                subshowers_dict[tail] = value
+            elif key.startswith(cls.METADATA_PREFIX):
                 tail = key[len(cls.METADATA_PREFIX) + 1 :]
-                metadata[tail] = loaded[key][tail][0]
+                metadata[tail] = value
+            else:
+                print(f"Unknown key: {key}")
+
+        shower_starts = ShowerStarts._load_dict(shower_starts_dict)
+        subshowers = Subshowers._load_dict(subshowers_dict)
         new = cls(shower_starts, subshowers, **metadata)
         return new
 
     def save(self, path: str):
-        assert path.endswith(".h5"), "Path must end with .h5"
-        to_save = self._prep_dataframes()
-        for key, df in to_save.items():
-            df.to_hdf(path, key=key, mode="a")
+        if path.endswith(".h5"):
+            path = path[:-3]
+        common_dict = self._prep_dataframes()
+        base_path = self.basepath(path)
+        for key, value in common_dict.items():
+            if key.endswith("folder"):
+                common_dict[key] = _os.path.relpath(value, base_path)
+        _raw.save(path, **common_dict)
 
     @classmethod
     def load(cls, path: str):
-        assert path.endswith(".h5"), "Path must end with .h5"
-        loaded = {}
-        with _pd.HDFStore(path) as store:
-            for key in store.keys():
-                loaded[key.strip("/")] = store.get(key)
+        if path.endswith(".h5"):
+            path = path[:-3]
+        loaded = _raw.load(path)
+        base_path = cls.basepath(path)
+        for key in loaded:
+            if key.endswith("folder"):
+                loaded[key] = _os.path.join(base_path, loaded[key])
         return cls._unpack_dataframes(loaded)
 
 
@@ -375,12 +322,12 @@ def run(
     verbose: bool = False,
 ):
     if output_path is None:
-        output_path = _os.path.join(folder, "subshowers.h5")
+        output_path = _os.path.join(folder, f"subshowers_e{energy_cut_value}.h5")
     if not overwrite and _os.path.exists(output_path):
         if verbose:
             print(f"{output_path} already exists. Skipping.")
         _os.remove(output_path)
-    reader = Reader(folder)
+    reader = _Reader(folder)
     start_condition = energy_cut(energy_cut_value)
     shower_starts = ShowerStarts(reader, start_condition, verbose=verbose)
     subshowers = Subshowers(reader, leaves_only, verbose=verbose)
@@ -404,4 +351,3 @@ if __name__ == "__main__":
         else:
             output_path = None
         run(folder, energy_cut_value, output_path=output_path, verbose=True)
-
