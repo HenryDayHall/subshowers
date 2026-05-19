@@ -4,7 +4,7 @@ Methods for reading and handling whole showers
 
 import os as _os
 import pandas as _pd
-import _yaml
+import yaml as _yaml
 
 
 class Reader:

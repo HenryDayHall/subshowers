@@ -1,4 +1,5 @@
 import os
+import warnings
 import pandas as pd
 import tempfile
 from subshowers import subshowers
@@ -39,13 +40,18 @@ def test_ShowerStarts():
     assert save_dict["root"] == 0
 
     start_condition = subshowers.energy_cut(0.1)
-    shower_starts = subshowers.ShowerStarts(mock_reader1, start_condition)
+    with warnings.catch_warnings(record=True) as w:
+        shower_starts = subshowers.ShowerStarts(mock_reader1, start_condition)
+        assert len(w) == 1
+        assert issubclass(w[0].category, UserWarning)
+        assert "root particle is also a start particle" in str(w[0].message)
     assert len(shower_starts) == 1
     assert len(shower_starts.get_loose_ends()) == 0
 
     mock_reader2 = MockReader(mock_history_dict_2())
     start_condition = subshowers.energy_cut(100)
-    shower_starts = subshowers.ShowerStarts(mock_reader2, start_condition)
+    with warnings.catch_warnings(record=True) as w:
+        shower_starts = subshowers.ShowerStarts(mock_reader2, start_condition)
     assert len(shower_starts) == 1
     loose_ends = shower_starts.get_loose_ends()
     assert len(loose_ends) == 0
@@ -72,7 +78,8 @@ def test_ShowerStarts():
     assert len(loose_ends) == 0
 
     start_condition = subshowers.energy_cut(6)
-    shower_starts = subshowers.ShowerStarts(mock_reader2, start_condition)
+    with warnings.catch_warnings(record=True) as w:
+        shower_starts = subshowers.ShowerStarts(mock_reader2, start_condition)
     assert len(shower_starts) == 1
     set_starts = set(shower_starts)
     assert {1} == set_starts
@@ -81,7 +88,8 @@ def test_ShowerStarts():
     assert loose_ends[0] == 2
 
     start_condition = subshowers.energy_cut(0.2)
-    shower_starts = subshowers.ShowerStarts(mock_reader2, start_condition)
+    with warnings.catch_warnings(record=True) as w:
+        shower_starts = subshowers.ShowerStarts(mock_reader2, start_condition)
     assert len(shower_starts) == 1
     set_starts = set(shower_starts)
     assert {3} == set_starts
@@ -92,7 +100,9 @@ def test_ShowerStarts():
 
 def test_get_subshowers():
     mock1 = pd.DataFrame.from_dict(mock_history_dict_1())
-    subshower = subshowers.get_subshower(mock1, 0, False)
+    with warnings.catch_warnings(record=True) as w:
+        subshower = subshowers.get_subshower(mock1, 0, False)
+        assert len(w) == 0
     assert set(subshower) == {0}
     subshower = subshowers.get_subshower(mock1, 0, True)
     assert set(subshower) == {0}
@@ -185,7 +195,9 @@ def test_Output():
         mock_reader.folder = tempdir
 
         start_condition = subshowers.energy_cut(100)
-        shower_starts = subshowers.ShowerStarts(mock_reader, start_condition)
+        with warnings.catch_warnings(record=True) as w:
+            shower_starts = subshowers.ShowerStarts(mock_reader, start_condition)
+            assert len(w) == 1
         subshowers1 = subshowers.Subshowers(mock_reader, True)
         subshowers1.add_subshower([0, 1])
 
@@ -214,7 +226,6 @@ def test_Output():
     assert len(save_dict["loose_ends"]) == 0
     assert save_dict["root"] == 0
 
-
     # check subshowers saved and loaded correctly
     assert len(new_subshowers) == 2
     assert len(new_subshowers.showerstarts) == 2
@@ -231,4 +242,3 @@ if __name__ == "__main__":
     test_get_subshowers()
     test_Subshowers()
     test_Output()
-
