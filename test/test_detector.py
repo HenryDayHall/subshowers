@@ -1,4 +1,4 @@
-import detector
+from subshowers import detector
 import numpy as np
 
 

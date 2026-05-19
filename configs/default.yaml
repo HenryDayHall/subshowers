@@ -1,0 +1,20 @@
+run_name: default
+
+storage_path: /data/dust/user/dayhallh/eas/data/
+
+showers:
+  folder: examples
+  subfolders: [example_10e4_photon_hist1,
+               example_10e4_photon_hist2,
+               example_10e4_photon_hist3,
+               example_10e8_photon_hist1,
+               ]
+
+
+detectors:
+  generator: 
+    name: generate_at_ground
+    distance_from_center: 1000.0
+    mean_width: 1.0
+    std_width: 1.0
+
