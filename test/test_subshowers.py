@@ -214,6 +214,7 @@ def test_Output():
     assert len(save_dict["loose_ends"]) == 0
     assert save_dict["root"] == 0
 
+
     # check subshowers saved and loaded correctly
     assert len(new_subshowers) == 2
     assert len(new_subshowers.showerstarts) == 2
@@ -222,3 +223,12 @@ def test_Output():
     assert sorted(save_dict["starts"]) == [0, 0, 1]
     assert sorted(save_dict["subshowers"]) == [2, 3, 3]
     assert save_dict["leaves_only"] == True
+
+
+if __name__ == "__main__":
+    test_energy_cut()
+    test_ShowerStarts()
+    test_get_subshowers()
+    test_Subshowers()
+    test_Output()
+

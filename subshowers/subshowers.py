@@ -292,8 +292,6 @@ class Output:
         return new
 
     def save(self, path: str):
-        if path.endswith(".h5"):
-            path = path[:-3]
         common_dict = self._prep_dataframes()
         base_path = self.basepath(path)
         for key, value in common_dict.items():
@@ -303,13 +301,16 @@ class Output:
 
     @classmethod
     def load(cls, path: str):
-        if path.endswith(".h5"):
-            path = path[:-3]
         loaded = _raw.load(path)
         base_path = cls.basepath(path)
         for key in loaded:
             if key.endswith("folder"):
                 loaded[key] = _os.path.join(base_path, loaded[key])
+            elif isinstance(loaded[key], _pd.DataFrame):
+                loaded[key] = loaded[key].values
+                if len(loaded[key].shape) == 2 and loaded[key].shape[1] == 1:
+                    loaded[key] = loaded[key][:, 0]
+
         return cls._unpack_dataframes(loaded)
 
 
