@@ -35,7 +35,7 @@ node_name=$(hostname -s)
 commands=\
 """
 Commands used;
-cd /home/dayhallh/eas
+cd /home/dayhallh/eas/subshowers
 source /etc/profile.d/modules.sh
 module load maxwell cuda/12.6
 module load maxwell mamba
@@ -46,7 +46,7 @@ python3 -c 'from subshowers.subshowers import run; run('${folder}', '${energy}')
 """
 echo "${commands}" >> ${command_record}
 
-cd /home/dayhallh/eas
+cd /home/dayhallh/eas/subshowers
 source /etc/profile.d/modules.sh
 module load maxwell cuda/12.6
 module load maxwell mamba
