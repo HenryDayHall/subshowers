@@ -314,6 +314,11 @@ class Output:
         return cls._unpack_dataframes(loaded)
 
 
+def subshower_exists(folder, energy_cut_value):
+    output_path = _os.path.join(folder, f"subshowers_e{energy_cut_value}.h5")
+    return _os.path.exists(output_path)
+
+
 def run(
     folder: str,
     energy_cut_value: float = 1000,

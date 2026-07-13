@@ -7,6 +7,14 @@ import pandas as _pd
 import yaml as _yaml
 
 
+def shower_exists(folder):
+    try:
+        Reader(folder)
+        return True
+    except ValueError:
+        return False
+
+
 class Reader:
     """
     Read data created by a modified CORSIKA8 from file
