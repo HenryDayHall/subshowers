@@ -20,7 +20,7 @@ import numpy as np
 from subshowers import detector
 from subshowers.showers import shower_exists
 from subshowers.sampling import DatasetSource, SubshowerSampler
-from subshowers.plotting import show_subshower
+from subshowers.sample_plotting import show_subshower
 
 from subshowers_test import fake_data
 
@@ -125,7 +125,7 @@ output_values = [
 ]
 
 # radial bin edges (metres) for the deposited-energy radial profile
-RADIAL_BINS = np.linspace(0.0, 5000.0, 26)
+
 
 
 def get_outputs(sample, detector_array, output_dict=None):
@@ -151,7 +151,7 @@ def get_outputs(sample, detector_array, output_dict=None):
 
     if len(nonzero_deposits) == 0 or total_energy == 0:
         output_dict["deposit_radial_spectrum"].append(
-            np.zeros(len(RADIAL_BINS) - 1)
+            []
         )
         output_dict["mean_deposit_offset"].append(np.nan)
         output_dict["max_deposit_radius"].append(0.0)
@@ -173,10 +173,7 @@ def get_outputs(sample, detector_array, output_dict=None):
     radii = np.linalg.norm(relative, axis=-1)
 
     # deposited-energy radial profile about the centroid
-    radial_spectrum, _ = np.histogram(
-        radii, bins=RADIAL_BINS, weights=nonzero_deposits
-    )
-    output_dict["deposit_radial_spectrum"].append(radial_spectrum)
+    output_dict["deposit_radial_spectrum"].append(radii)
 
     output_dict["max_deposit_radius"].append(float(radii.max()))
     output_dict["mean_deposit_radius"].append(float(np.sum(radii * weights)))
