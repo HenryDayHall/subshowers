@@ -298,13 +298,43 @@ def show_pierre_auger(axis=None):
     add_scatter(pierre_auger, extent, axis=axis, alpha=0.5, s=1)
 
 
-def show_subshower(inital_KE, energy_per_detector, array=None, axis=None, **kwargs):
+def show_subshower(
+    inital_KE,
+    energy_per_detector,
+    array=None,
+    axis=None,
+    initial_position=None,
+    **kwargs,
+):
     if array is None:
         array = detector.generate_pierre_auger()
     if axis is None:
         axis = _plt.gca()
 
     grid_center, grid_size = detector.center_and_size(array, energy_per_detector)
+    if grid_center is None:
+        grid_center = _np.zeros(3)
+    if not grid_size:
+        grid_size = 10_000
+    if initial_position is not None:
+        initial_position = _np.asarray(initial_position, dtype=float)
+        # grow the grid (keeping its centre) until the initial position fits
+        half_size = grid_size / 2
+        for i in (0, 1):
+            distance = abs(initial_position[i] - grid_center[i])
+            if distance > half_size:
+                half_size = distance
+        grid_size = half_size * 2 * 1.1
+        # plot the location of the initial_position as a *
+        axis.scatter(
+            initial_position[0],
+            initial_position[1],
+            s=100,
+            c="w",
+            edgecolors="k",
+            marker="*",
+        )
+
     grid_pa, grid_center, grid_size = detector.grid_positions(
         array, bins=1000, grid_size=grid_size, grid_center=grid_center
     )
