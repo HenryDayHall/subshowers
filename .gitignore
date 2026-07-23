@@ -149,3 +149,4 @@ testbed.ipynb
 *.pth
 *.swp
 *.npy
+.aider*

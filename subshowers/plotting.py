@@ -4,7 +4,11 @@ import pandas as _pd
 import plotly.graph_objects as _go
 import numpy as _np
 from plotly.express.colors import sample_colorscale
+import matplotlib as _matplotlib
+import matplotlib.pyplot as _plt
+
 import skimage.draw as _skdraw
+from subshowers import detector
 
 
 def add_shower_skeleton(
@@ -148,7 +152,6 @@ def add_shower_relations(
     overview,
     name="Shower Relations",
 ):
-
     # make a white to gray colorscale
     colorscale = [
         [0.0, "rgb(0,0,0)"],
@@ -249,6 +252,83 @@ def add_selected_subshowers(
             name=name,
         )
     return fig
+
+
+def add_scatter(sensitive_regions, extent, energy_per_region=None, axis=None, **kwargs):
+    xs, ys = _np.copy(sensitive_regions.centers[:, 0]), _np.copy(
+        sensitive_regions.centers[:, 1]
+    )
+
+    mask = (xs < extent[1]) * (xs > extent[0]) * (ys < extent[3]) * (ys > extent[2])
+    if not _np.any(mask):
+        return None
+    if energy_per_region is None:
+        c = None
+    else:
+        c = energy_per_region[mask]
+        print(f"Total colour {c.sum()}")
+        if _np.all(c == 0):
+            c[:] = 1
+        elif _np.any(c == 0):
+            c[c == 0] = 0.01 * _np.min(c[c > 0])
+        kwargs["norm"] = _matplotlib.colors.LogNorm()
+
+    if axis is None:
+        axis = _plt.gca()
+
+    path_collection = axis.scatter(xs[mask], ys[mask], c=c, **kwargs)
+    return path_collection
+
+
+def calculate_extent(grid_center, grid_size):
+    extent = _np.full(4, grid_size / 2)
+    extent[[0, 2]] *= -1
+    extent[[0, 1]] += grid_center[0]
+    extent[[2, 3]] += grid_center[1]
+    return extent
+
+
+def show_pierre_auger(axis=None):
+    pierre_auger = detector.generate_pierre_auger()
+    grid_size = 100_000
+    max_values = _np.max(pierre_auger.centers, axis=0)
+    min_values = _np.max(pierre_auger.centers, axis=0)
+    grid_center = (max_values + min_values) / 2
+    extent = calculate_extent(grid_center, grid_size)
+    add_scatter(pierre_auger, extent, axis=axis, alpha=0.5, s=1)
+
+
+def show_subshower(inital_KE, energy_per_detector, array=None, axis=None, **kwargs):
+    if array is None:
+        array = detector.generate_pierre_auger()
+    if axis is None:
+        axis = _plt.gca()
+
+    grid_center, grid_size = detector.center_and_size(array, energy_per_detector)
+    grid_pa, grid_center, grid_size = detector.grid_positions(
+        array, bins=1000, grid_size=grid_size, grid_center=grid_center
+    )
+    energy_grid = _np.copy(grid_pa).astype(float)
+    for j, e in enumerate(energy_per_detector):
+        energy_grid[grid_pa == (j + 1)] = e
+    axis.set_title(
+        f"initial KE {inital_KE:.2}, total deposit {energy_per_detector.sum():.4}"
+    )
+    extent = calculate_extent(grid_center, grid_size)
+    path_collection = add_scatter(
+        array,
+        extent,
+        energy_per_detector,
+        alpha=0.5,
+        s=20,
+        cmap="cool",
+        axis=axis,
+        **kwargs,
+    )
+    if path_collection is not None:
+        _plt.colorbar(path_collection)
+    axis.set_xlabel("x [m]")
+    axis.set_ylabel("y [m]")
 
 
 # Main workflow:
