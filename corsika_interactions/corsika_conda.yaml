@@ -1,0 +1,27 @@
+name: corsika
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - python
+  - pip
+  - graphviz
+  - particle==0.25.1
+  - numpy
+  - conan
+  - doxygen
+  - matplotlib
+  - ipykernel
+  - pandas
+  - pyarrow
+  - plotly
+  - ca-certificates
+  - certifi
+  - openssl
+  - ipdb
+  - pytest
+  - pytables
+  - coverage
+  - scikit-image
+  - h5py
+prefix: /data/dust/user/dayhallh/.conda/envs/corsika
