@@ -3,11 +3,10 @@ run_name: default
 storage_path: /data/dust/user/dayhallh/eas/data/
 
 showers:
-  folder: examples
-  subfolders: [example_10e4_photon_hist1,
-               example_10e4_photon_hist2,
-               example_10e4_photon_hist3,
-               example_10e8_photon_hist1,
+  folder: PDG22
+  subfolders: [e1e5_0,
+               e1e6_0,
+               e1e7_0,
                ]
 
 

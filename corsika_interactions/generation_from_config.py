@@ -27,3 +27,4 @@ for subfolder in config["showers"]["subfolders"]:
 to_add = os.linesep.join(to_add)
 
 # TODO want to check for existing showers
+# TODO want to make a version of 
