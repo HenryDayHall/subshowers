@@ -202,5 +202,35 @@ if ! make -j"$n_jobs" 2>&1 | tee "$make_log"; then
 fi
 make install || die "make install failed"
 
+##### Setup script
+# Paths and the environment name are written in, so it takes no arguments
+setup_script=$install_dir/setup_env.sh
+cat > "$setup_script" << EOF
+#!/bin/bash
+##### Written by $my_name: sets up a shell to run this CORSIKA 8 build
+#   source $setup_script
+#   c8_air_shower_with_history ...
+# The binary reads corsika/modules/data and corsika-build/modules/pythia8
+# at run time, so keep both in place.
+
+_c8_setup() {
+    unset -f _c8_setup
+    local -  # puts back the caller's set -e and -u on return,
+    set +eu  # which conda's shell code isn't always safe with
+
+    # Scripts don't get conda's shell functions from .bashrc
+    [[ \$(type -t conda) == function ]] || eval "\$("\${CONDA_EXE:-conda}" shell.bash hook)"
+    conda activate "$env_name" || return
+
+    # Both would override paths compiled into the binary, and Pythia stops
+    # if PYTHIA8DATA holds another Pythia version's data
+    export CORSIKA_DATA="$src_dir/modules/data"
+    unset PYTHIA8DATA
+    export PATH="$build_dir/applications:\$PATH"
+}
+_c8_setup
+EOF
+echo "To run CORSIKA, first: source $setup_script"
+
 echo
 echo "Installed CORSIKA to $install_prefix"
