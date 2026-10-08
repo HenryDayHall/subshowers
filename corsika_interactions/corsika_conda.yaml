@@ -24,4 +24,5 @@ dependencies:
   - coverage
   - scikit-image
   - h5py
+  - perl
 prefix: /data/dust/user/dayhallh/.conda/envs/corsika

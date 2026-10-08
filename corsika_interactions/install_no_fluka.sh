@@ -106,6 +106,22 @@ for program in git cmake make g++ gfortran rsync tar conan; do
 done
 [[ ${#missing[@]} -eq 0 ]] || die "required programs not found: ${missing[*]}"
 
+# conan crashes with "FileExistsError" if its home exists but isn't a folder.
+# ~/.conan2 may be a symlink to a folder elsewhere (some tools ignore
+# $CONAN_HOME), and deleting an old install can delete its target, so
+# recreate the target if it's gone. The cache in it will be rebuilt.
+conan_home=${CONAN_HOME:-$HOME/.conan2}
+if [[ -L "$conan_home" && ! -e "$conan_home" ]]; then
+    conan_target=$(readlink "$conan_home")
+    # a relative link target is relative to the folder holding the link
+    [[ "$conan_target" == /* ]] || conan_target=$(dirname "$conan_home")/$conan_target
+    echo "Recreating $conan_target, which the symlink $conan_home points to"
+    mkdir -p -- "$conan_target" || die "could not create $conan_target for $conan_home"
+fi
+if [[ -e "$conan_home" && ! -d "$conan_home" ]]; then
+    die "conan's home $conan_home exists but isn't a folder; move it aside"
+fi
+
 
 ##### Source
 step "Getting CORSIKA source, branch $branch"
