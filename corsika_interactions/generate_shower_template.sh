@@ -5,7 +5,7 @@
 #SBATCH --job-name eas_gen_s
 #SBATCH --output /data/dust/user/%u/eas/joblogs/eas_gen_s_%A_%a.out
 #SBATCH --error /data/dust/user/%u/eas/joblogs/eas_gen_s_%A_%a.err
-#SBATCH --array=0-2
+#SBATCH --array=REPLACE_WITH_ARRAY_RANGE
 
 
 start_time=$(date +%s)
