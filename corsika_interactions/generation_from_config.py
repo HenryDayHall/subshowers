@@ -26,5 +26,7 @@ for subfolder in config["showers"]["subfolders"]:
 
 to_add = os.linesep.join(to_add)
 
-# TODO want to check for existing showers
-# TODO want to make a version of 
+# 1. TODO want to check for existing showers, and skip all existing data, giving notice to the user
+# 2. TODO want to make a copy of the template, change the REPLACE_WITH_EAS_BASE_FOLDER to the path from the configs, compile all the subfolders fromt he configs and replace REPLACE_THIS_LINE with each of them
+# 3. TODO submit the job to slurm
+# 4. TODO cna we make a dagman to start the subshowers when this is done?

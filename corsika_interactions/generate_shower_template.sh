@@ -7,15 +7,12 @@
 #SBATCH --error /data/dust/user/%u/eas/joblogs/eas_gen_s_%A_%a.err
 #SBATCH --array=0-2
 
-set -euo pipefail
 
 start_time=$(date +%s)
 
-# if EAS_BASE_FOLDER is not set, pick a username based default
-if [ -z "$EAS_BASE_FOLDER" ]; then
-    EAS_BASE_FOLDER="/data/dust/user/$USER/eas"
-fi
+EAS_BASE_FOLDER=REPLACE_WITH_EAS_BASE_FOLDER
 echo "Task ID is $SLURM_ARRAY_TASK_ID, EAS_BASE_FOLDER is $EAS_BASE_FOLDER"
+set -euo pipefail
 
 possible_output_folders=(
 REPLACE_THIS_LINE
@@ -39,11 +36,12 @@ node_name=$(hostname -s)
 echo "$output_folder $node_name $pdg $energy $shower_number"
 command_record="${output_folder}_commands.txt"
 
-mkdir -p "${output_folder}"
+# CORSIKA 8 refuses to write into an existing output dir, so only create the parent
+mkdir -p "$(dirname "${output_folder}")"
 
 commands=$(cat <<EOF
 cd ${EAS_BASE_FOLDER}
-source setup_env.sh
+set +u; source setup_env.sh; set -u
 cd ${EAS_BASE_FOLDER}/corsika-build/applications
 
 ./c8_air_shower_with_history --pdg "${pdg}" -E "${energy}" -f "${output_folder}" --seed "${shower_number}"
@@ -51,16 +49,12 @@ EOF
 )
 echo "${commands}" > "${command_record}"
 
-cd ${EAS_BASE_FOLDER}
-source setup.sh
-cd ${EAS_BASE_FOLDER}/corsika-build/applications
-
 set +e
-./c8_air_shower_with_history --pdg "${pdg}" -E "${energy}" -f "${output_folder}" --seed "${shower_number}"
+eval "${commands}"
 status=$?
 set -e
 
 end_time=$(date +%s)
 duration=$((end_time-start_time))
 echo "Job took $duration seconds" >> "${command_record}"
-exit $status
+exit "$status"
