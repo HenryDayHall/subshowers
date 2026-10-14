@@ -144,14 +144,17 @@ draws uniformly across all of them at the cost of more reloading.
 
 ## Configuration
 
-`configs/default.yaml` describes where a dataset lives and which detector array
-to build:
+`configs/default.yaml` describes where a dataset lives, which subshowers to make
+from it, and which detector array to build:
 
 ```yaml
 storage_path: /path/to/data/
 showers:
   folder: examples
   subfolders: [example_10e4_photon_hist1, ...]
+subshowers:
+  energy_cuts: [100, 500, 900]   # GeV, one set of subshowers per shower and cut
+  leaves_only: true
 detectors:
   generator:
     name: generate_at_ground
@@ -185,7 +188,7 @@ subshowers/
 └── raw_save_load.py   Small HDF5 + yaml save/load helper
 corsika_interactions/  Scripts to install a history-retaining CORSIKA 8 and generate showers
 configs/               Example configuration
-scripts/               Notebooks and analysis scripts
+scripts/               Notebooks, analysis scripts and subshower generation jobs
 test/                  pytest suite, plus generators for fake histories
 ```
 
@@ -201,6 +204,21 @@ python corsika_interactions/generation_from_config.py configs/default.yaml
 ```
 
 The install builds without FLUKA.
+
+## Generating subshowers
+
+Once the showers exist, submit one SLURM array task per shower and energy cut
+listed in the config's `subshowers` section:
+
+```bash
+python scripts/subshower_generation_from_config.py configs/default.yaml
+```
+
+Each task runs `subshowers.run` in the `corsika` conda environment and writes
+`subshowers_e<cut>.h5`, with its `.yaml`, into the shower's folder. Sets already
+made with the same settings are skipped, as are showers that haven't finished.
+`--dry-run` writes the job script (`generate_subshowers.sh` in the showers
+folder) without submitting it.
 
 ## Plotting
 

@@ -10,6 +10,24 @@ showers:
                ]
 
 
+subshowers:
+  # One set of subshowers is made for each shower and energy cut, saved in
+  # the shower's folder as subshowers_e<cut>.h5 (with a .yaml of settings).
+
+  # Showers to split, inside the showers folder above. Leave this out to
+  # split every shower listed in the showers section.
+  # subfolders: [e1e5_0]
+
+  # A subshower starts at the first particle down each branch with kinetic
+  # energy below the cut, in GeV. Write large cuts out in full, or with a
+  # sign in the exponent (1.0e+4), as yaml reads 1e4 as text.
+  energy_cuts: [100, 500, 900]
+
+  # true keeps only the leaves of each subshower, which is what the
+  # detector sampler expects; false keeps every particle in the subshower.
+  leaves_only: true
+
+
 detectors:
   generator: 
     name: generate_at_ground
