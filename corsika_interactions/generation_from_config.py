@@ -52,7 +52,8 @@ if not to_add:
 n_folders = len(to_add)
 to_add = os.linesep.join(to_add)
 
-template = template.replace("REPLACE_WITH_EAS_BASE_FOLDER", config["storage_path"])
+eas_base_name = os.path.dirname(config["storage_path"].rstrip('/'))
+template = template.replace("REPLACE_WITH_EAS_BASE_FOLDER", eas_base_name)
 template = template.replace("REPLACE_WITH_ARRAY_RANGE", f"0-{n_folders - 1}")
 template = template.replace("REPLACE_THIS_LINE", to_add)
 
@@ -74,7 +75,3 @@ print(result.stdout.strip())
 job_id = result.stdout.strip().split()[-1]
 print(f"Submitted array job {job_id}")
 
-# 1. TODO want to check for existing showers, and skip all existing data, giving notice to the user DONE
-# 2. TODO want to make a copy of the template, change the REPLACE_WITH_EAS_BASE_FOLDER to the path from the configs, compile all the subfolders fromt he configs and replace REPLACE_THIS_LINE with each of them DONE
-# 3. TODO submit the job to slurm DONE
-# 4. TODO cna we make a dagman to start the subshowers when this is done? Yes, ish. We can make --dependancy==afterok:{job_id}
