@@ -70,13 +70,12 @@ class SubmissionError(RuntimeError):
 # line with the note that 1e8 GeV took more than two days.
 SHOWER_MINUTES = {1e5: 18.3, 1e6: 165.0, 1e7: 350.0}
 
-# Finding subshowers takes about this long per particle in the history, plus
-# this long per particle for every particle in the history, as each step of
-# the tree walk scans the whole history. Fitted to subshowers.run on
-# test/fake_data.py showers of six thousand to eight hundred thousand
-# particles.
-SUBSHOWER_SECONDS_PER_PARTICLE = 300e-6
-SUBSHOWER_SECONDS_PER_PARTICLE_SQUARED = 1.05e-9
+# Splitting a shower takes about this long per particle in its history, plus
+# time to start up. subshowers.run took 7 seconds for 10 million particles
+# (reading the history, building its tree, finding and saving subshowers),
+# using about 320 bytes of memory per particle.
+SUBSHOWER_SECONDS_PER_PARTICLE = 1e-6
+SUBSHOWER_STARTUP_SECONDS = 60
 
 # History length is taken to grow in proportion to energy, calibrated on any
 # finished histories. With none to read, assume this many particles per GeV.
@@ -108,10 +107,7 @@ def shower_minutes(energy):
 
 def subshower_minutes(n_particles):
     """Estimated run time in minutes of subshowers.run on a history this long."""
-    seconds = n_particles * (
-        SUBSHOWER_SECONDS_PER_PARTICLE
-        + SUBSHOWER_SECONDS_PER_PARTICLE_SQUARED * n_particles
-    )
+    seconds = SUBSHOWER_STARTUP_SECONDS + SUBSHOWER_SECONDS_PER_PARTICLE * n_particles
     return seconds / 60
 
 

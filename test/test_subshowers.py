@@ -137,8 +137,8 @@ def test_Subshowers():
 
     save_dict = subshowers1._save_dict()
     assert save_dict["folder"] == "folder.parquet"
-    assert save_dict["starts"] == []
-    assert save_dict["subshowers"] == []
+    assert len(save_dict["starts"]) == 0
+    assert len(save_dict["subshowers"]) == 0
     assert save_dict["leaves_only"] == True
 
     with tempfile.TemporaryDirectory() as tempdir:

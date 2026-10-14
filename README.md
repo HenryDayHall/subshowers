@@ -178,7 +178,7 @@ Copy the file and edit the paths rather than editing the default in place.
 
 ```
 subshowers/
-├── showers.py         Reader for history files; ShowerFolders from a config
+├── showers.py         Reader for history files; HistoryTree; ShowerFolders from a config
 ├── subshowers.py      Shower starts, subshower extraction, saving and loading
 ├── detector.py        Detector arrays and track/region intersection
 ├── responses.py       Energy deposited per detector by a set of particles
@@ -238,10 +238,12 @@ estimates are in `subshowers/generation.py`:
 
 - shower run time follows energy (`SHOWER_MINUTES`), starting from 18.3
   minutes for a 1e5 GeV photon;
-- subshower run time grows with the square of the number of particles in the
-  history (`subshower_minutes`). The number is read from finished histories
-  (with pyarrow) and scaled by energy for showers not made yet. Jobs estimated
-  to need more than 7 days aren't submitted.
+- subshower run time grows in step with the number of particles in the
+  history (`subshower_minutes`): about 7 seconds and 3 GB of memory for 10
+  million particles. The number is read from finished histories (with
+  pyarrow) and scaled by energy for showers not made yet.
+
+Jobs estimated to need more than 7 days aren't submitted.
 
 ## Plotting
 

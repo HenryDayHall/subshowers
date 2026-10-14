@@ -98,12 +98,11 @@ def test_wall_times():
     # under the limit, but not with the safety margin
     tight = generation.wall_time(5 * 24 * 60)
     assert tight.limit == "7-00:00:00" and tight.capped and not tight.too_long
-    # subshower run time tends to grow with the square of the history length
-    ratios = [
-        generation.subshower_minutes(10 * n) / generation.subshower_minutes(n)
-        for n in [1e6, 1e7, 1e8]
-    ]
-    assert 50 < ratios[0] < ratios[1] < ratios[2] < 100
+    # subshower run time grows in proportion to the history length,
+    # so even a billion particles fits the minimum time limit
+    ratio = generation.subshower_minutes(1e10) / generation.subshower_minutes(1e9)
+    assert 9 < ratio < 10
+    assert generation.wall_time(generation.subshower_minutes(1e9)).limit == "0-01:00:00"
 
 
 def test_make_shower(config):
@@ -240,6 +239,7 @@ def test_unfinished_shower_left_alone(config, slurm, capsys):
 def test_too_long_not_submitted(config, slurm, capsys, monkeypatch):
     config["showers"]["subfolders"] = ["e1e5_0", "e1e9_0"]
     monkeypatch.setattr(generation, "history_length", lambda folder: 10**8)
+    monkeypatch.setattr(generation, "SUBSHOWER_SECONDS_PER_PARTICLE", 0.01)
     generation.generate(config)
     assert sbatch_calls(slurm) == []
     out = capsys.readouterr().out
