@@ -1,3 +1,4 @@
+import inspect
 import numpy as np
 import os
 from abc import ABC
@@ -66,13 +67,15 @@ def intersects_horizontal_circle(start_position, normed_direction, centers, radi
     distance_to_plane = (start_position[..., 2] - centers[..., 2]) / -normed_direction[
         ..., 2
     ]
-    point_on_plane = (
-        start_position[..., [0, 1]]
-        + normed_direction[..., [0, 1]] * distance_to_plane[..., None]
-    )
-    distance2 = np.sum((point_on_plane - centers[..., [0, 1]]) ** 2, axis=-1)
-    in_range = distance2 <= radius2
-    into_plane = np.sign(distance_to_plane) > 0
+    # offset in x and y, from each center, of where the line meets its plane
+    x_offset = (
+        start_position[..., 0] + normed_direction[..., 0] * distance_to_plane
+    ) - centers[..., 0]
+    y_offset = (
+        start_position[..., 1] + normed_direction[..., 1] * distance_to_plane
+    ) - centers[..., 1]
+    in_range = x_offset * x_offset + y_offset * y_offset <= radius2
+    into_plane = distance_to_plane > 0
     return in_range & into_plane
 
 
@@ -175,13 +178,13 @@ class Triangles(SensitiveRegions):
         return intersects
 
     def _these_check_intersections(self, idxs, start_positions, normed_directions):
-        # dimensions like (M, N)
+        # one triangle for each start position; dimensions like (M,)
         distance_to_centers = np.sqrt(
             np.sum((self.centers[idxs] - start_positions) ** 2, axis=-1)
         )
-        # dimensions like (M, N, 3)
+        # dimensions like (M, 3)
         point_beyond = (
-            start_positions + normed_directions * distance_to_centers[:, :, None] * 2
+            start_positions + normed_directions * distance_to_centers[:, None] * 2
         )
         intersects = intersects_triangle(
             start_positions, point_beyond, self.edges[idxs]
@@ -235,16 +238,20 @@ class HorizontalCircles(SensitiveRegions):
 
 
 def generate_at_ground(
-    total, distance_from_center=1000.0, mean_width=1.0, std_width=1.0
+    total, distance_from_center=1000.0, mean_width=1.0, std_width=1.0, seed=None
 ):
-    angles = np.random.uniform(0, 2 * np.pi, size=(total))
-    radial_distances = np.sqrt(
-        np.random.uniform(0, distance_from_center**2, size=(total))
-    )
+    """
+    `total` triangles at z = 0, placed at random within distance_from_center
+    of the origin. With a seed, the same array is made every time; without
+    one, numpy's global random state (np.random.seed) decides.
+    """
+    rng = np.random if seed is None else np.random.default_rng(seed)
+    angles = rng.uniform(0, 2 * np.pi, size=(total))
+    radial_distances = np.sqrt(rng.uniform(0, distance_from_center**2, size=(total)))
     x_offset = radial_distances * np.cos(angles)
     y_offset = radial_distances * np.sin(angles)
     offset = np.stack((x_offset, y_offset), axis=-1)
-    relative_edges = np.random.normal(0, 1, size=(total, 3, 2))
+    relative_edges = rng.normal(0, 1, size=(total, 3, 2))
     unnormed_width_2 = np.maximum(
         np.maximum(
             np.sum((relative_edges[:, 0] - relative_edges[:, 1]) ** 2, axis=-1),
@@ -253,7 +260,7 @@ def generate_at_ground(
         np.sum((relative_edges[:, 2] - relative_edges[:, 0]) ** 2, axis=-1),
     )
     unnormed_width = np.sqrt(unnormed_width_2)
-    widths = np.random.normal(mean_width, std_width, size=(total,))
+    widths = rng.normal(mean_width, std_width, size=(total,))
     scale = widths / unnormed_width
     edges = scale[:, None, None] * relative_edges + offset[:, None, :]
     z_coord = np.zeros((total, 3, 1))
@@ -263,14 +270,29 @@ def generate_at_ground(
 
 DEFAULT_COLUMNS = ["id", "northing", "easting", "altitude"]
 
+# Columns of sdMap.csv after DEFAULT_COLUMNS. start holds each station's start
+# time; stop is 1 for stations still running, and otherwise the time they
+# stopped; sd1500 and sd750 are 1 for stations in those grids.
+PIERRE_AUGER_COLUMNS = ["start", "stop", "sd1500", "sd750"]
+# for_array options: the columns where 1 picks out a set of stations
+PIERRE_AUGER_ARRAYS = ["stop", "sd1500", "sd750"]
+
 
 def generate_pierre_auger(for_array=None):
-    additional_columns = ["start", "stop", "sd1500", "sd750"]
-    if for_array is not None:
-        assert (
-            for_array in additional_columns
-        ), f"{for_array} not in {additional_columns}"
-    cols = DEFAULT_COLUMNS + additional_columns
+    """
+    The surface detector stations of the Pierre Auger Observatory, as circles
+    of radius 10 m, centred on the mean position of the stations chosen.
+
+    for_array picks the stations: "stop" for those still running, "sd1500"
+    or "sd750" for the stations of those grids, or None for every station
+    listed. That includes stations since replaced, some at the same place as
+    their replacement, where a particle is counted twice.
+    """
+    if for_array is not None and for_array not in PIERRE_AUGER_ARRAYS:
+        raise ValueError(
+            f"for_array must be one of {PIERRE_AUGER_ARRAYS} or None, not {for_array!r}"
+        )
+    cols = DEFAULT_COLUMNS + PIERRE_AUGER_COLUMNS
     script_location = os.path.dirname(os.path.realpath(__file__))
     csv_location = os.path.join(script_location, "sdMap.csv")
     array = generate_from_csv(csv_location, cols, for_array)
@@ -278,6 +300,12 @@ def generate_pierre_auger(for_array=None):
 
 
 def generate_from_csv(file_name, columns=None, filter_column=None, match_value=1):
+    """
+    Horizontal circles of radius 10 m at the stations listed in a csv file
+    with columns id, northing, easting and altitude (and any others named in
+    columns), centred on the mean easting and northing. With filter_column,
+    only the stations where that column equals match_value are kept.
+    """
     if columns is None:
         columns = DEFAULT_COLUMNS
     with open(file_name, "r") as f:
@@ -287,8 +315,13 @@ def generate_from_csv(file_name, columns=None, filter_column=None, match_value=1
         columns
     ), f"named column length {len(columns)} != number columns in file {columns_in_file}"
     if filter_column is not None:
-        filter_on = csv_values[:, columns.index(filter_column)].astype(int)
-        csv_values = csv_values[filter_on == match_value]
+        # csv_values has one row per column, and one column per station
+        filter_on = csv_values[columns.index(filter_column)].astype(float)
+        csv_values = csv_values[:, filter_on == match_value]
+        if csv_values.shape[1] == 0:
+            raise ValueError(
+                f"no stations in {file_name} have {filter_column} = {match_value}"
+            )
     centers = np.zeros((csv_values.shape[1], 3))
     xs = csv_values[columns.index("easting")].astype(float)
     xs -= np.mean(xs)
@@ -299,6 +332,71 @@ def generate_from_csv(file_name, columns=None, filter_column=None, match_value=1
     zs = csv_values[columns.index("altitude")].astype(float)
     centers[:, 2] = zs
     return HorizontalCircles(centers, 10)
+
+
+class DetectorConfigError(ValueError):
+    """A config's detectors section doesn't describe an array that can be made."""
+
+
+def generators():
+    """The functions a config can name to build an array: {name: function}."""
+    return {
+        name: value
+        for name, value in globals().items()
+        if name.startswith("generate_") and callable(value)
+    }
+
+
+def generator_settings(config):
+    """(name, arguments) from a config's detectors: generator section."""
+    section = config.get("detectors") if isinstance(config, dict) else None
+    settings = section.get("generator") if isinstance(section, dict) else None
+    if not isinstance(settings, dict):
+        raise DetectorConfigError(
+            "the config needs a detectors section with a generator, e.g."
+            " detectors: {generator: {name: generate_pierre_auger}}"
+        )
+    arguments = dict(settings)
+    name = arguments.pop("name", None)
+    options = generators()
+    if not isinstance(name, str) or name not in options:
+        raise DetectorConfigError(
+            f"detectors: generator: name must be one of {sorted(options)},"
+            f" not {name!r}"
+        )
+    try:
+        inspect.signature(options[name]).bind(**arguments)
+    except TypeError as error:
+        raise DetectorConfigError(f"detectors: generator: {name}: {error}") from None
+    return name, arguments
+
+
+def from_config(config):
+    """
+    Build the array a config's detectors section describes. The generator's
+    name is one of the generate_ functions here, and its other keys are that
+    function's arguments:
+
+        detectors:
+          generator:
+            name: generate_pierre_auger
+            for_array: stop
+    """
+    name, arguments = generator_settings(config)
+    try:
+        return generators()[name](**arguments)
+    except (TypeError, ValueError) as error:
+        raise DetectorConfigError(f"detectors: generator: {name}: {error}") from None
+
+
+def is_unseeded(config):
+    """
+    True if the config's detector array is random and has no seed, so every
+    array made from the config is different.
+    """
+    name, arguments = generator_settings(config)
+    parameters = inspect.signature(generators()[name]).parameters
+    return "seed" in parameters and arguments.get("seed") is None
 
 
 def edges_from_coords(northing, easting, altitude, single_detector, center=None):

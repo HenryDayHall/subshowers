@@ -29,9 +29,22 @@ subshowers:
 
 
 detectors:
-  generator: 
+  # The detector array the subshowers are sampled with, for example by
+  # scripts/plot_observables_from_config.py. name is one of the generate_
+  # functions in subshowers/detector.py, and the other keys are its arguments.
+  generator:
     name: generate_at_ground
+    total: 20
     distance_from_center: 1000.0
     mean_width: 1.0
     std_width: 1.0
+    # this array is random; with a seed it's the same array every time
+    seed: 0
+
+  # The Pierre Auger surface detector instead. for_array is stop (stations
+  # still running), sd1500 or sd750; leave it out for every station listed,
+  # including some since replaced at the same place.
+  # generator:
+  #   name: generate_pierre_auger
+  #   for_array: stop
 

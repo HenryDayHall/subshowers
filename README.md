@@ -142,6 +142,11 @@ A `DatasetSource` can either load subshowers from a saved `Output` file
 evicted LRU-style; `iter_epoch` visits one source at a time, while `iter_random`
 draws uniformly across all of them at the cost of more reloading.
 
+`detector.from_config(config)` builds the array a config's `detectors` section
+describes (see [Configuration](#configuration)), and
+`datasets.check_subshower_sets(config)` says which of the config's subshower
+sets are made, with a `DatasetSource` for each that is.
+
 ## Configuration
 
 `configs/default.yaml` describes where a dataset lives, which subshowers to make
@@ -157,9 +162,25 @@ subshowers:
   leaves_only: true
 detectors:
   generator:
-    name: generate_at_ground
+    name: generate_at_ground  # a generate_ function in subshowers/detector.py
+    total: 20                 # and its arguments
     ...
+    seed: 0
 ```
+
+The detector generators are `generate_at_ground` (random triangles; give it a
+`seed` so it's the same array every time), `generate_from_csv`, and
+`generate_pierre_auger`, the Pierre Auger surface detector:
+
+```yaml
+detectors:
+  generator:
+    name: generate_pierre_auger
+    for_array: stop  # the stations still running; or sd1500, or sd750
+```
+
+Leaving out `for_array` gives every station listed, including some since
+replaced at the same place, where a particle is counted twice.
 
 `ShowerFolders` turns that into a list of shower folders:
 
@@ -181,8 +202,11 @@ subshowers/
 ├── showers.py         Reader for history files; HistoryTree; ShowerFolders from a config
 ├── subshowers.py      Shower starts, subshower extraction, saving and loading
 ├── detector.py        Detector arrays and track/region intersection
-├── responses.py       Energy deposited per detector by a set of particles
+├── responses.py       Energy deposited per detector; Responses, which stores it for many subshowers
 ├── sampling.py        DatasetSource / SubshowerSampler over many shower folders
+├── datasets.py        Which of the subshower sets a config asks for are made
+├── observables.py     Observables of detector responses, and figures of them
+├── population_plotting.py  Histograms and scatter plots for those figures
 ├── plane.py           Particles crossing a horizontal detection plane
 ├── sample_plotting.py Matplotlib and plotly views of showers and responses
 ├── raw_save_load.py   Small HDF5 + yaml save/load helper
@@ -245,7 +269,54 @@ estimates are in `subshowers/generation.py`:
 
 Jobs estimated to need more than 7 days aren't submitted.
 
-## Plotting
+## Plotting observables
+
+```bash
+python scripts/plot_observables_from_config.py configs/default.yaml
+```
+
+samples every subshower set the config asks for with the config's detector
+array, and plots observables of what the array sees: start conditions against
+deposited energy, multiplicity, and the size and shape of the deposits. It
+lists the sets that are missing, and why, and plots the rest. The plots and a
+`report.txt` go in `plots/<run_name>` in the showers folder (or
+`--output-dir`):
+
+- `e<cut>/` for each energy cut, with the subshowers grouped by the primary
+  energy of their shower, by the particle that starts them, and for electrons
+  and positrons alone, plus a few examples of the detectors hit;
+- `all_cuts/`, comparing the cuts.
+
+The `distributions_*` figures normalise each group to its own number of
+subshowers, so groups of different sizes can be compared.
+
+The detector responses are slow to work out, so each set's are saved in
+`responses/` in the output folder, and used again while the set, the detector
+and the options stay the same. `--max-subshowers N` uses N subshowers at random
+from each set, for a quicker look; `--detected-only` plots only the subshowers
+that deposited energy; `--recompute` works the responses out again.
+
+Saved responses are what a generative model's subshowers can be compared with.
+Put the model's subshowers through the same array, with `start_pdg`,
+`start_kinetic_energy`, `start_time`, `start_position`, `start_direction` and
+`energy_per_detector` for each, and plot the two together:
+
+```python
+from subshowers import detector, observables
+from subshowers.responses import Responses
+
+array = detector.from_config(config)
+dataset = Responses.concatenate(Responses.load(path) for path in saved_paths)
+model = Responses.from_samples(model_samples, len(array), source="model")
+fig = observables.distributions(
+    {
+        "dataset": observables.record_of(dataset, array),
+        "model": observables.record_of(model, array),
+    }
+)
+```
+
+## Plotting showers
 
 ```bash
 python -m subshowers.sample_plotting <saved subshowers .h5> [x_axis] [y_axis]
