@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time 0-12:00:00
+#SBATCH --time REPLACE_WITH_TIME_LIMIT
 #SBATCH --nodes 1
 #SBATCH --partition maxcpu
 #SBATCH --job-name eas_gen_ss
@@ -7,11 +7,10 @@
 #SBATCH --error /data/dust/user/%u/eas/joblogs/eas_gen_ss_%A_%a.err
 #SBATCH --array=REPLACE_WITH_ARRAY_RANGE
 
-# Splits showers into subshowers, one array task per output file.
-# subshower_generation_from_config.py fills in the REPLACE_WITH_ values
-# from a config and submits a copy of this template.
-# Run time grows roughly with the square of the number of particles in the
-# history, so very large showers may need a longer --time.
+# Splits one shower into subshowers, one array task per energy cut.
+# subshowers/generation.py fills in the REPLACE_WITH_ values, with a time
+# limit to suit the shower's size (see subshower_minutes there), and submits
+# a copy, which waits for the shower's job if it's still being made.
 
 
 start_time=$(date +%s)

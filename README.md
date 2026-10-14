@@ -42,7 +42,7 @@ Then run from the repository root, or put it on your `PYTHONPATH`, so that
 `import subshowers` resolves.
 
 Generating the input showers is a separate job — see
-[`corsika_interactions/`](#repository-layout).
+[Generating data](#generating-data).
 
 ## Input data format
 
@@ -185,40 +185,63 @@ subshowers/
 ├── sampling.py        DatasetSource / SubshowerSampler over many shower folders
 ├── plane.py           Particles crossing a horizontal detection plane
 ├── sample_plotting.py Matplotlib and plotly views of showers and responses
-└── raw_save_load.py   Small HDF5 + yaml save/load helper
+├── raw_save_load.py   Small HDF5 + yaml save/load helper
+└── generation.py      Plans and submits the SLURM jobs that make showers and subshowers
 corsika_interactions/  Scripts to install a history-retaining CORSIKA 8 and generate showers
 configs/               Example configuration
-scripts/               Notebooks, analysis scripts and subshower generation jobs
+scripts/               Notebooks, analysis scripts and data generation scripts
 test/                  pytest suite, plus generators for fake histories
 ```
 
-## Generating showers
+## Installing CORSIKA
 
 `corsika_interactions/` installs a modified CORSIKA 8 (the `histories_1` branch
-of `HenryDayHall/CORSIKA8`) into a conda environment and submits shower
-generation jobs:
+of `HenryDayHall/CORSIKA8`) into a conda environment:
 
 ```bash
 corsika_interactions/setup_if_needed.sh <install directory> [<env name>]
-python corsika_interactions/generation_from_config.py configs/default.yaml
 ```
 
-The install builds without FLUKA.
+The install builds without FLUKA. Shower jobs look for it in the folder above
+the config's `storage_path`.
 
-## Generating subshowers
+## Generating data
 
-Once the showers exist, submit one SLURM array task per shower and energy cut
-listed in the config's `subshowers` section:
+One command submits every SLURM job needed to make the data a config
+describes:
 
 ```bash
-python scripts/subshower_generation_from_config.py configs/default.yaml
+python scripts/generate_data_from_config.py configs/default.yaml [--dry-run]
 ```
 
-Each task runs `subshowers.run` in the `corsika` conda environment and writes
-`subshowers_e<cut>.h5`, with its `.yaml`, into the shower's folder. Sets already
-made with the same settings are skipped, as are showers that haven't finished.
-`--dry-run` writes the job script (`generate_subshowers.sh` in the showers
-folder) without submitting it.
+It checks what's already made or queued, then submits
+
+- shower jobs for missing showers, one array job per energy;
+- subshower jobs for missing energy cuts, one array job per shower, running
+  `subshowers.run` in the `corsika` conda environment. Jobs for showers still
+  being made wait for them (`--dependency=afterok`), and are cancelled if the
+  shower job fails.
+
+`corsika_interactions/generation_from_config.py` and
+`scripts/subshower_generation_from_config.py` take the same arguments, and
+submit only showers or only subshowers. `--dry-run` writes the job scripts
+without submitting them.
+
+Job scripts go in `jobs/` in the showers folder, with `submitted_jobs.yaml`,
+a record of what each job makes. Along with `squeue`, that keeps queued work
+from being submitted twice. Showers that were started but never finished are
+left alone; delete the folder to make one again.
+
+Each job's time limit is twice its estimated run time, rounded up to whole
+hours, from 1 hour up to the 7-day maximum of the `maxcpu` partition. The
+estimates are in `subshowers/generation.py`:
+
+- shower run time follows energy (`SHOWER_MINUTES`), starting from 18.3
+  minutes for a 1e5 GeV photon;
+- subshower run time grows with the square of the number of particles in the
+  history (`subshower_minutes`). The number is read from finished histories
+  (with pyarrow) and scaled by energy for showers not made yet. Jobs estimated
+  to need more than 7 days aren't submitted.
 
 ## Plotting
 

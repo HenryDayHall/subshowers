@@ -1,77 +1,19 @@
-import yaml
-import sys
+"""
+Submit SLURM jobs that generate the showers in a config's showers section,
+one array job per primary energy, each with a time limit to suit the energy.
+
+    python corsika_interactions/generation_from_config.py configs/default.yaml
+
+Showers already made or queued are skipped. With --dry-run the job scripts
+are written but not submitted. To make the subshowers as well, with jobs that
+wait for these showers, use scripts/generate_data_from_config.py instead.
+"""
+
 import os
-import subprocess
+import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from subshowers import generation  # noqa: E402
 
-if not len(sys.argv) == 2:
-    print(f"Usage: {sys.argv[0]} <config_file>")
-    sys.exit(1)
-
-config_file = sys.argv[1]
-print(f"Using config file: {config_file}")
-with open(config_file, "r") as f:
-    config = yaml.safe_load(f)
-
-this_dir = os.path.dirname(os.path.abspath(__file__))
-template_file_path = os.path.join(this_dir, "generate_shower_template.sh")
-with open(template_file_path, "r") as f:
-    template = f.read()
-
-
-def generation_complete(energy_folder):
-    """A generation is complete once summary.yaml records an end time."""
-    summary_path = os.path.join(energy_folder, "summary.yaml")
-    if not os.path.isfile(summary_path):
-        return False
-    with open(summary_path, "r") as f:
-        return any(line.startswith("end time: ") for line in f)
-
-
-outer_dir = os.path.join(config["storage_path"], config["showers"]['folder'])
-os.makedirs(outer_dir, exist_ok=True)
-
-to_add = []
-skipped = []
-for subfolder in config["showers"]["subfolders"]:
-    energy_folder = os.path.join(outer_dir, subfolder)
-    if generation_complete(energy_folder):
-        skipped.append(subfolder)
-        continue
-    to_add.append(energy_folder)
-
-if skipped:
-    print(f"Skipping {len(skipped)} already-completed shower(s):")
-    for subfolder in skipped:
-        print(f"  {subfolder}")
-
-if not to_add:
-    print("All showers already generated, nothing to submit.")
-    sys.exit(0)
-
-n_folders = len(to_add)
-to_add = os.linesep.join(to_add)
-
-eas_base_name = os.path.dirname(config["storage_path"].rstrip('/'))
-template = template.replace("REPLACE_WITH_EAS_BASE_FOLDER", eas_base_name)
-template = template.replace("REPLACE_WITH_ARRAY_RANGE", f"0-{n_folders - 1}")
-template = template.replace("REPLACE_THIS_LINE", to_add)
-
-generated_script = os.path.join(outer_dir, "generate_showers.sh")
-with open(generated_script, "w") as f:
-    f.write(template)
-print(f"Wrote {generated_script} with {n_folders} shower(s), array 0-{n_folders - 1}")
-
-result = subprocess.run(
-    ["sbatch", generated_script],
-    capture_output=True,
-    text=True,
-)
-if result.returncode != 0:
-    print(f"sbatch failed:\n{result.stderr}")
-    sys.exit(result.returncode)
-
-print(result.stdout.strip())
-job_id = result.stdout.strip().split()[-1]
-print(f"Submitted array job {job_id}")
-
+if __name__ == "__main__":
+    generation.command_line(make_subshowers=False, description=__doc__)
