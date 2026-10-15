@@ -35,9 +35,13 @@ from collections import OrderedDict as _OrderedDict
 from dataclasses import dataclass as _dataclass, field as _field
 
 import numpy as _np
+import pandas as _pd
 
 from subshowers.showers import Reader as _Reader
 from subshowers import subshowers as _subshowers
+
+# history columns a sample is made from
+_SAMPLED_COLUMNS = ["pdg", "x", "y", "z", "px", "py", "pz", "kinetic_energy", "time"]
 
 
 class DatasetSource:
@@ -242,22 +246,45 @@ class SubshowerSampler:
 
     # -- building one sample -------------------------------------------
 
+    @staticmethod
+    def _columns(reader):
+        """
+        The history's columns as numpy arrays, and a function giving the
+        positions in them of reader.data index labels. Indexing these is much
+        faster than indexing the DataFrame by label.
+        """
+        data = reader.data
+        columns = {name: data[name].to_numpy() for name in _SAMPLED_COLUMNS}
+        index = data.index
+        if isinstance(index, _pd.RangeIndex) and index.start == 0 and index.step == 1:
+            return columns, _np.asarray
+
+        def positions_of(labels):
+            positions = index.get_indexer(_np.atleast_1d(labels))
+            if (positions < 0).any():
+                raise KeyError(f"not in the history: {labels}")
+            return positions
+
+        return columns, positions_of
+
     def _detect(self, reader, leaf_indices):
         """energy per detector and the indices of leaves that hit."""
         n_detectors = len(self.detector_array)
         energy_per_detector = _np.zeros(n_detectors)
         detected = []
         leaf_indices = _np.asarray(leaf_indices)
+        columns, positions_of = self._columns(reader)
         for chunk_start in range(0, len(leaf_indices), self.chunk_size):
             chunk = leaf_indices[chunk_start : chunk_start + self.chunk_size]
+            positions = positions_of(chunk)
             start_positions = _np.stack(
-                [reader.data[c][chunk] for c in ["x", "y", "z"]], axis=-1
+                [columns[c][positions] for c in ["x", "y", "z"]], axis=-1
             )
             directions = _np.stack(
-                [reader.data[c][chunk] for c in ["px", "py", "pz"]], axis=-1
+                [columns[c][positions] for c in ["px", "py", "pz"]], axis=-1
             )
             hits = self.detector_array.hit_any(start_positions, directions)
-            energies = _np.array(reader.data["kinetic_energy"][chunk])
+            energies = columns["kinetic_energy"][positions]
             energy_per_detector += _np.sum(hits * energies[:, None], axis=0)
             detected.append(chunk[hits.any(axis=-1)])
         return energy_per_detector, _np.concatenate(detected)
@@ -267,21 +294,21 @@ class SubshowerSampler:
         start_index, leaf_indices = source[subshower_number]
         reader = source.reader
         energy_per_detector, detected_leaves = self._detect(reader, leaf_indices)
-        start_kinetic_energy = float(reader.data["kinetic_energy"][start_index])
-        start_position = _np.array(
-            [reader.data[c][start_index] for c in ["x", "y", "z"]]
+        columns, positions_of = self._columns(reader)
+        start = int(_np.atleast_1d(positions_of(start_index))[0])
+        start_kinetic_energy = float(columns["kinetic_energy"][start])
+        start_position = _np.array([columns[c][start] for c in ["x", "y", "z"]])
+        start_direction = _np.array([columns[c][start] for c in ["px", "py", "pz"]])
+        total_leaf_energy = float(
+            _np.sum(columns["kinetic_energy"][positions_of(leaf_indices)])
         )
-        start_direction = _np.array(
-            [reader.data[c][start_index] for c in ["px", "py", "pz"]]
-        )
-        total_leaf_energy = float(_np.sum(reader.data["kinetic_energy"][leaf_indices]))
         sample = DetectedSample(
             source=source,
             subshower_number=subshower_number,
             start_index=start_index,
             leaf_indices=leaf_indices,
-            start_pdg=reader.data["pdg"][start_index],
-            start_time=reader.data["time"][start_index],
+            start_pdg=columns["pdg"][start],
+            start_time=columns["time"][start],
             start_kinetic_energy=start_kinetic_energy,
             start_position=start_position,
             start_direction=start_direction,

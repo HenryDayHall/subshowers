@@ -1,5 +1,66 @@
+import re as _re
+
 import numpy as _np
 from matplotlib import pyplot as _plt
+
+# Group colours, given out in this order. As a set they keep neighbouring
+# colours apart under colour-vision deficiency, and the first three are
+# apart in every pair. Groups past the eighth, and OTHER, are grey: fold
+# small groups into OTHER rather than plot more than about seven.
+PALETTE = [
+    "#2a78d6",  # blue
+    "#eb6834",  # orange
+    "#1baf7a",  # aqua
+    "#eda100",  # yellow
+    "#e87ba4",  # magenta
+    "#008300",  # green
+    "#6250d6",  # violet
+    "#e34948",  # red
+]
+GREY = "#8a8984"
+OTHER = "other"
+
+
+def _natural_key(name):
+    """Sorts numbers within names by value, e.g. cut 900 before cut 1000."""
+    parts = _re.split(r"(\d+)", str(name))
+    return [int(part) if part.isdigit() else part for part in parts]
+
+
+def group_colours(group_names):
+    """
+    {group name: colour}, in the order to draw and list the groups: sorted,
+    with numbers in names compared by value, and OTHER last. Groups keep
+    their colours whenever the same set of groups is plotted.
+    """
+    names = sorted((name for name in group_names if name != OTHER), key=_natural_key)
+    colours = {
+        name: PALETTE[i] if i < len(PALETTE) else GREY for i, name in enumerate(names)
+    }
+    if OTHER in group_names:
+        colours[OTHER] = GREY
+    return colours
+
+
+def bin_edges(values, log=False, n_edges=40):
+    """
+    Edges spanning the finite values: geometric if log and the values are
+    all positive, otherwise even. A single value gets a range around it, as
+    histograms need increasing edges.
+    """
+    values = _np.asarray(values, dtype=float)
+    values = values[_np.isfinite(values)]
+    if values.size == 0:
+        return _np.linspace(0.0, 1.0, n_edges)
+    lo, hi = values.min(), values.max()
+    if log and lo > 0:
+        if lo == hi:
+            lo, hi = lo / 2, hi * 2
+        return _np.geomspace(lo, hi, n_edges)
+    if lo == hi:
+        half_width = abs(lo) * 0.1 if lo else 0.5
+        lo, hi = lo - half_width, hi + half_width
+    return _np.linspace(lo, hi, n_edges)
 
 
 def scatter_with_marginals(
@@ -32,14 +93,14 @@ def scatter_with_marginals(
     ax = fig.add_subplot(inner[1, 0])
     ax_topx = fig.add_subplot(inner[0, 0], sharex=ax)
     ax_righty = fig.add_subplot(inner[1, 1], sharey=ax)
-    ax_topx.tick_params(labelbottom=False)
-    ax_righty.tick_params(labelleft=False)
+    # which="both", as log axes spanning less than a decade label minor ticks
+    ax_topx.tick_params(which="both", labelbottom=False)
+    ax_righty.tick_params(which="both", labelleft=False)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
 
-    group_names = sorted(by_grouping)
-    colours = _plt.cm.tab10(_np.linspace(0, 1, len(group_names)))
-    group_name_colours = dict(zip(group_names, colours))
+    group_name_colours = group_colours(by_grouping)
+    group_names = list(group_name_colours)
 
     all_x, all_y = [], []
     for group_name in group_names:
@@ -68,16 +129,8 @@ def scatter_with_marginals(
     all_x = _np.concatenate(all_x)
     all_y = _np.concatenate(all_y)
 
-    x_bins = (
-        _np.geomspace(all_x.min(), all_x.max(), 40)
-        if x_log
-        else _np.linspace(all_x.min(), all_x.max(), 40)
-    )
-    y_bins = (
-        _np.geomspace(all_y.min(), all_y.max(), 40)
-        if y_log and all_y.min() > 0
-        else _np.linspace(all_y.min(), all_y.max(), 40)
-    )
+    x_bins = bin_edges(all_x, x_log)
+    y_bins = bin_edges(all_y, y_log)
     for group_name in group_names:
         record = by_grouping[group_name]
         xs = _np.asarray([x_get(v) for v in record[x_key]], dtype=float)
@@ -97,7 +150,7 @@ def scatter_with_marginals(
             orientation="horizontal",
         )
 
-    if x_log:
+    if x_log and all_x.min() > 0:
         ax.set_xscale("log")
     if y_log and all_y.min() > 0:
         ax.set_yscale("log")
@@ -126,9 +179,8 @@ def spectrum_histogram(
     if combined:
         merged = {key: [s for store in by_grouping.values() for s in store[key]]}
         by_grouping = {"all": merged}
-    group_names = sorted(by_grouping)
-    colours = _plt.cm.tab10(_np.linspace(0, 1, len(group_names)))
-    group_name_colours = dict(zip(group_names, colours))
+    group_name_colours = group_colours(by_grouping)
+    group_names = list(group_name_colours)
 
     # per-group_name list of per-sample value arrays, and the pooled values
     per_sample = {}
@@ -150,11 +202,8 @@ def spectrum_histogram(
         return
 
     all_values = _np.concatenate(all_values)
-    lo, hi = all_values.min(), all_values.max()
-    if log_x and lo > 0:
-        bins = _np.geomspace(lo, hi, 40)
-    else:
-        bins = _np.linspace(lo, hi, 40)
+    lo = all_values.min()
+    bins = bin_edges(all_values, log_x)
     centres = 0.5 * (bins[:-1] + bins[1:])
 
     for group_name in group_names:

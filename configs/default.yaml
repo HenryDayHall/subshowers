@@ -10,10 +10,41 @@ showers:
                ]
 
 
+subshowers:
+  # One set of subshowers is made for each shower and energy cut, saved in
+  # the shower's folder as subshowers_e<cut>.h5 (with a .yaml of settings).
+
+  # Showers to split, inside the showers folder above. Leave this out to
+  # split every shower listed in the showers section.
+  # subfolders: [e1e5_0]
+
+  # A subshower starts at the first particle down each branch with kinetic
+  # energy below the cut, in GeV. Write large cuts out in full, or with a
+  # sign in the exponent (1.0e+4), as yaml reads 1e4 as text.
+  energy_cuts: [100, 500, 900]
+
+  # true keeps only the leaves of each subshower, which is what the
+  # detector sampler expects; false keeps every particle in the subshower.
+  leaves_only: true
+
+
 detectors:
-  generator: 
+  # The detector array the subshowers are sampled with, for example by
+  # scripts/plot_observables_from_config.py. name is one of the generate_
+  # functions in subshowers/detector.py, and the other keys are its arguments.
+  generator:
     name: generate_at_ground
+    total: 20
     distance_from_center: 1000.0
     mean_width: 1.0
     std_width: 1.0
+    # this array is random; with a seed it's the same array every time
+    seed: 0
+
+  # The Pierre Auger surface detector instead. for_array is stop (stations
+  # still running), sd1500 or sd750; leave it out for every station listed,
+  # including some since replaced at the same place.
+  # generator:
+  #   name: generate_pierre_auger
+  #   for_array: stop
 

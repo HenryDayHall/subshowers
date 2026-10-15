@@ -6,9 +6,10 @@ May need to alter that.
 import sys as _sys
 import os as _os
 import warnings as _warnings
+import numpy as _np
 import pandas as _pd
 
-from subshowers.showers import Reader as _Reader
+from subshowers.showers import Reader as _Reader, HistoryTree as _HistoryTree
 from subshowers import raw_save_load as _raw
 
 
@@ -23,6 +24,21 @@ def energy_cut(energy: float):
         Energy in GeV
     """
     return lambda **kwargs: kwargs["kinetic_energy"] < energy
+
+
+def _history_tree(reader) -> _HistoryTree:
+    """The reader's HistoryTree, or a new one for readers that don't keep one."""
+    tree = getattr(reader, "tree", None)
+    return tree if tree is not None else _HistoryTree(reader.data)
+
+
+def _evaluate_condition(start_condition: callable, data: _pd.DataFrame):
+    """start_condition for every particle at once, as an array of bools."""
+    result = _np.asarray(start_condition(**data), dtype=bool)
+    if result.shape != (len(data),):
+        # a condition that doesn't depend on the particles
+        result = _np.broadcast_to(result, (len(data),))
+    return result
 
 
 class ShowerStarts:
@@ -42,6 +58,8 @@ class ShowerStarts:
             Function to determine when a subshower starts.
             Must take the columns specified in Reader.history_columns
             as keyname arguments and return a bool.
+            It's called once with whole columns, so it must work element
+            by element, returning one bool per particle (as energy_cut does).
         verbose : bool
             Print progress
         """
@@ -74,13 +92,21 @@ class ShowerStarts:
         """
         Find the root particle, the start of each subshower,
         and the leaf particles with no valid subshower.
+
+        Walking down from the root, the first particle on each branch that
+        meets the start condition starts a subshower, and nothing below it
+        is considered for another start. Leaves reached without meeting the
+        condition are loose ends.
         """
         data = self.reader.data
-        root = data.index[data["parent_label"] == -1][0]
-        self._root = data["label"][root]
-        root_values = data.loc[root]
-        if self.start_condition(**root_values):
-            self._starts = _pd.Index([root])
+        tree = _history_tree(self.reader)
+        if tree.root is None:
+            raise ValueError("The history has no root particle (parent_label -1)")
+        root = tree.root
+        self._root = data["label"].iloc[root]
+        is_start = _evaluate_condition(self.start_condition, data)
+        if is_start[root]:
+            self._starts = tree.index[[root]]
             self._loose_ends = _pd.Index([])
             _warnings.warn(
                 "The root particle is also a start particle,"
@@ -88,41 +114,21 @@ class ShowerStarts:
                 UserWarning,
             )
             return
-        self._starts = []
-        self._loose_ends = []
-        stack = [root]
-        i = 0
-        while stack:
-            i += 1
-            if i % 1000 == 0 and self.verbose:
-                fraction = i / len(self.reader)
-                print(
-                    f"Processed {fraction:00.1%} of total particles."
-                    f" Found {len(self._starts)} starts.",
-                    end="\r",
-                )
-
-            parent = stack.pop()
-            child_indices = data.index[data["parent_label"] == data.at[parent, "label"]]
-            child_values = data.loc[child_indices]
-            if child_values.empty:
-                self._loose_ends.append(parent)
-                continue
-            is_start = self.start_condition(**child_values)
-            self._starts += list(child_indices[is_start])
-            stack += list(child_indices[~is_start])
+        in_shower = _np.sort(tree.subtree(root))
+        owner = tree.topmost_marked(is_start)[in_shower]
+        starts = in_shower[owner == in_shower]
+        loose_ends = in_shower[(owner < 0) & tree.is_leaf[in_shower]]
+        self._starts = _pd.Index(tree.labels_of(starts))
+        self._loose_ends = _pd.Index(tree.labels_of(loose_ends))
         if self.verbose:
-            fraction = i / len(self.reader)
             print(
-                f"Found all {len(self._starts)} starts after "
-                f"processing {fraction:.1%} of total particles"
+                f"Found {len(self._starts)} starts and {len(self._loose_ends)}"
+                f" loose ends among {len(in_shower)} particles"
             )
-        self._starts = _pd.Index(self._starts)
-        self._loose_ends = _pd.Index(self._loose_ends)
-        if self._loose_ends.any():
+        if len(self._loose_ends):
             _warnings.warn(
                 f"Found {len(self._loose_ends)} loose ends,"
-                f"with {len(self._starts)} starts.",
+                f" with {len(self._starts)} starts.",
                 UserWarning,
             )
 
@@ -150,22 +156,20 @@ class ShowerStarts:
         return self._loose_ends
 
 
-def get_subshower(data, start_index: int, leaves_only: bool = True) -> list:
+def get_subshower(
+    data, start_index: int, leaves_only: bool = True, tree: _HistoryTree = None
+) -> _np.ndarray:
     """
     Get data for particles in a subshower, either all particles,
-    or just leaf particles.
+    or just leaf particles, as index labels of data.
+
+    Building the HistoryTree takes a pass over the whole history, so when
+    collecting many subshowers, build it once and pass it as tree.
     """
-    subshower = []
-    stack = [start_index]
-    while stack:
-        parent = stack.pop()
-        child_indices = data.index[data["parent_label"] == data.at[parent, "label"]]
-        if child_indices.empty:
-            subshower.append(parent)
-        elif not leaves_only:
-            subshower.append(parent)
-        stack += list(child_indices)
-    return subshower
+    if tree is None:
+        tree = _HistoryTree(data)
+    position = tree.positions_of([start_index])[0]
+    return tree.labels_of(tree.subtree(position, leaves_only))
 
 
 class Subshowers:
@@ -186,19 +190,29 @@ class Subshowers:
         return len(self.showerstarts)
 
     def add_subshower(self, start_index: list | _pd.Index):
-        n_to_add = len(start_index)
-        for i, start in enumerate(start_index):
-            if start in self.showerstarts:
-                continue
-            if self.verbose:
-                fraction = i / n_to_add
-                print(
-                    f"Processed {fraction:00.1%} of total starts.",
-                    end="\r",
-                )
-            subshower = get_subshower(self.reader.data, start, self.leaves_only)
-            self.subshowers.append(subshower)
+        """
+        Add the subshower below each of these start particles (index labels
+        of the history), skipping starts already added.
+        """
+        known = set(self.showerstarts)
+        new_starts = []
+        for start in start_index:
+            if start not in known:
+                known.add(start)
+                new_starts.append(start)
+        if not new_starts:
+            return
+        tree = _history_tree(self.reader)
+        for start, position in zip(new_starts, tree.positions_of(new_starts)):
+            members = tree.subtree(position, self.leaves_only)
+            self.subshowers.append(tree.labels_of(members))
             self.showerstarts.append(start)
+        if self.verbose:
+            n_particles = sum(len(subshower) for subshower in self.subshowers)
+            print(
+                f"Collected {len(new_starts)} subshowers;"
+                f" {len(self)} hold {n_particles} particles in all"
+            )
 
     def __getitem__(self, item):
         return self.showerstarts[item], self.subshowers[item]
@@ -208,12 +222,15 @@ class Subshowers:
             yield start, subshower
 
     def _save_dict(self) -> dict:
-        flat_starts = [
-            start
-            for start, subshower in zip(self.showerstarts, self.subshowers)
-            for _ in subshower
-        ]
-        flat_subshowers = sum(self.subshowers, [])
+        """Starts and particles as two flat arrays, one row per particle."""
+        lengths = [len(subshower) for subshower in self.subshowers]
+        flat_starts = _np.repeat(
+            _np.asarray(self.showerstarts, dtype=_np.int64), lengths
+        )
+        if self.subshowers:
+            flat_subshowers = _np.concatenate(self.subshowers).astype(_np.int64)
+        else:
+            flat_subshowers = _np.zeros(0, dtype=_np.int64)
         return {
             "folder": self.reader.folder,
             "starts": flat_starts,
@@ -222,15 +239,22 @@ class Subshowers:
         }
 
     @classmethod
-    def _load_dict(cls, dictionary: dict):
-        reader = _Reader(dictionary["folder"])
+    def _load_dict(cls, dictionary: dict, reader: _Reader = None):
+        """
+        Rebuild from _save_dict's output, with starts in increasing order.
+        reader, if given, is used rather than reading the folder's history.
+        """
+        if reader is None:
+            reader = _Reader(dictionary["folder"])
         new = Subshowers(reader, dictionary["leaves_only"])
-        flat_starts = dictionary["starts"]
-        flat_subshowers = dictionary["subshowers"]
-        new.showerstarts = sorted(set(flat_starts))
-        new.subshowers = [[] for _ in new.showerstarts]
-        for start, subshower in zip(flat_starts, flat_subshowers):
-            new.subshowers[new.showerstarts.index(start)].append(subshower)
+        flat_starts = _np.asarray(dictionary["starts"], dtype=_np.int64)
+        flat_subshowers = _np.asarray(dictionary["subshowers"], dtype=_np.int64)
+        if len(flat_starts) == 0:
+            return new
+        order = _np.argsort(flat_starts, kind="stable")
+        starts, first_rows = _np.unique(flat_starts[order], return_index=True)
+        new.showerstarts = starts.tolist()
+        new.subshowers = _np.split(flat_subshowers[order], first_rows[1:])
         return new
 
 
@@ -287,7 +311,14 @@ class Output:
                 print(f"Unknown key: {key}")
 
         shower_starts = ShowerStarts._load_dict(shower_starts_dict)
-        subshowers = Subshowers._load_dict(subshowers_dict)
+        # both normally come from the same history, so only read it once
+        reader = shower_starts.reader
+        same_folder = _os.path.normpath(subshowers_dict["folder"]) == _os.path.normpath(
+            reader.folder
+        )
+        subshowers = Subshowers._load_dict(
+            subshowers_dict, reader=reader if same_folder else None
+        )
         new = cls(shower_starts, subshowers, **metadata)
         return new
 

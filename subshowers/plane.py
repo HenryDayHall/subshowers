@@ -64,6 +64,7 @@ class PlaneDistributions:
         self._start_idx_reached = 0
         self._leaf_idx_reached = 0
         self._print_frequency = 1
+        self._init_arrays()
 
     def _init_arrays(self):
         self._subshower_starts = _np.zeros(
@@ -71,7 +72,8 @@ class PlaneDistributions:
         )
         self._locations_on_plane = _np.zeros((self._leaf_block_length, 2))
         self._leaf_values = _np.zeros((self._leaf_block_length, len(self.leaf_columns)))
-        self._start_indices = _np.zeros((self._start_block_length), dtype=int)
+        # for each leaf, the row of subshower_starts it belongs to
+        self._start_indices = _np.zeros((self._leaf_block_length), dtype=int)
 
     @property
     def subshower_starts(self):
@@ -87,16 +89,17 @@ class PlaneDistributions:
 
     @property
     def start_indices(self):
-        return self._start_indices[: self._start_idx_reached]
+        return self._start_indices[: self._leaf_idx_reached]
 
     def append_one_subshower(self, start, locations, leaf_values):
-        while self._start_idx_reached <= len(self._subshower_starts):
+        while self._start_idx_reached >= len(self._subshower_starts):
             self._subshower_starts = _np.append(
                 self._subshower_starts,
                 _np.zeros((self._start_block_length, len(self.start_columns))),
                 axis=0,
             )
-        self._subshower_starts[self._start_idx_reached] = start
+        subshower_row = self._start_idx_reached
+        self._subshower_starts[subshower_row] = start
         self._start_idx_reached += 1
         leaves_to_add = len(locations)
         while leaves_to_add + self._leaf_idx_reached > len(self._locations_on_plane):
@@ -112,7 +115,7 @@ class PlaneDistributions:
             )
             self._start_indices = _np.append(
                 self._start_indices,
-                _np.zeros((self._start_block_length), dtype=int),
+                _np.zeros((self._leaf_block_length), dtype=int),
                 axis=0,
             )
         self._locations_on_plane[
@@ -123,7 +126,7 @@ class PlaneDistributions:
         ] = leaf_values
         self._start_indices[
             self._leaf_idx_reached : self._leaf_idx_reached + leaves_to_add
-        ] = self._start_idx_reached
+        ] = subshower_row
         self._leaf_idx_reached += leaves_to_add
 
     def append_subshowers(self, subshowers):
@@ -157,13 +160,13 @@ class PlaneDistributions:
             "height": self.height,
             "start_columns": self.start_columns,
             "leaf_columns": self.leaf_columns,
-            "subshower_starts": self._subshower_starts,
+            "subshower_starts": self.subshower_starts,
             }
 
         same_length = {
-            "locations_on_plane": self._locations_on_plane,
-            "leaf_values": self._leaf_values,
-            "start_indices": self._start_indices
+            "locations_on_plane": self.locations_on_plane,
+            "leaf_values": self.leaf_values,
+            "start_indices": self.start_indices,
         }
         return irregular_items, same_length
 
@@ -175,7 +178,10 @@ class PlaneDistributions:
         for key, value in loaded_dict.items():
             if not key.endswith("_columns"):
                 key = "_" + key
+                value = _np.asarray(value)
             setattr(new_plane, key, value)
+        new_plane._start_idx_reached = len(new_plane._subshower_starts)
+        new_plane._leaf_idx_reached = len(new_plane._locations_on_plane)
         return new_plane
 
     def save(self, path: str):
