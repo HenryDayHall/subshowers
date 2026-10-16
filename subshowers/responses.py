@@ -41,6 +41,8 @@ class StoredSample:
     n_detected_leaves: int
     total_leaf_energy: float
     energy_per_detector: np.ndarray = field(repr=False)  # (N_detectors,)
+    # history index labels of the leaves that hit some detector; None if unknown
+    detected_leaf_indices: np.ndarray = field(default=None, repr=False)
 
     @property
     def total_detected_energy(self) -> float:
@@ -68,6 +70,11 @@ class Responses:
     takes anything with the attributes it reads. observables.record_of works
     out observables from a Responses, so populations measured with the same
     array can be compared.
+
+    For subshowers from the dataset, it also keeps which of their leaves hit
+    some detector (as history index labels), so that what reaches the
+    detectors can be summarised like what reaches the ground (see
+    ground.GroundSummaries.detected_in).
     """
 
     # one value per subshower, and its type
@@ -83,7 +90,8 @@ class Responses:
     }
     # three values per subshower
     vector_columns = ["start_position", "start_direction"]
-    FORMAT_VERSION = 1
+    # 2 added which leaves hit a detector; files of version 1 are still read
+    FORMAT_VERSION = 2
 
     def __init__(
         self,
@@ -93,6 +101,9 @@ class Responses:
         hit_detectors,
         hit_energies,
         metadata=None,
+        detected_offsets=None,
+        detected_leaves=None,
+        detected_known=None,
     ):
         """
         Parameters
@@ -112,12 +123,30 @@ class Responses:
         metadata : dict
             Anything that can be written as json, e.g. how the responses
             were made.
+        detected_offsets : array (N_subshowers + 1,), optional
+            Subshower i's leaves that hit some detector are
+            detected_offsets[i]:detected_offsets[i + 1] of detected_leaves.
+        detected_leaves : array (N_detected,), optional
+            Their index labels in the subshower's history.
+        detected_known : array (N_subshowers,) of bool, optional
+            Whether each subshower's detected leaves are known; those that
+            aren't, such as a generative model's, have none listed. Without
+            detected_offsets, no subshower's are known.
         """
         self.n_detectors = int(n_detectors)
         self.hit_offsets = np.asarray(hit_offsets, dtype=np.int64)
         self.hit_detectors = np.asarray(hit_detectors, dtype=np.int64)
         self.hit_energies = np.asarray(hit_energies, dtype=np.float64)
         n_subshowers = len(self.hit_offsets) - 1
+        if detected_offsets is None:
+            detected_offsets = np.zeros(n_subshowers + 1)
+            detected_leaves = []
+            detected_known = np.zeros(n_subshowers, dtype=bool)
+        self.detected_offsets = np.asarray(detected_offsets, dtype=np.int64)
+        self.detected_leaves = np.asarray(detected_leaves, dtype=np.int64)
+        if detected_known is None:
+            detected_known = np.ones(n_subshowers, dtype=bool)
+        self.detected_known = np.asarray(detected_known, dtype=bool).reshape(-1)
         self.values = {}
         for name, kind in self.scalar_columns.items():
             self.values[name] = np.asarray(values[name], dtype=kind).reshape(
@@ -141,6 +170,22 @@ class Responses:
             and self.hit_detectors.max() < self.n_detectors
         ):
             raise ValueError(f"hit detectors must be below {self.n_detectors}")
+        detected = self.detected_offsets
+        if (
+            len(detected) != len(offsets)
+            or detected[0] != 0
+            or np.any(np.diff(detected) < 0)
+            or detected[-1] != len(self.detected_leaves)
+        ):
+            raise ValueError(
+                "detected_offsets must have one more entry than there are"
+                " subshowers, start at 0, never decrease, and end at the"
+                " number of detected leaves"
+            )
+        if len(self.detected_known) != len(offsets) - 1:
+            raise ValueError("detected_known must have an entry for each subshower")
+        if np.any(np.diff(detected)[~self.detected_known] > 0):
+            raise ValueError("subshowers whose detected leaves aren't known list none")
 
     # ----------------------------------------------------------- building
 
@@ -150,14 +195,20 @@ class Responses:
         Responses to some samples: sampling.DetectedSamples, or any objects
         with start_pdg, start_kinetic_energy, start_time, start_position,
         start_direction and energy_per_detector (one value per detector).
-        Their subshower_number, n_leaves, n_detected_leaves and
-        total_leaf_energy are kept if they have them. source names the
-        population; by default it's each sample's source, or its source's
-        name.
+        Their subshower_number, n_leaves, n_detected_leaves,
+        total_leaf_energy and detected_leaf_indices are kept if they have
+        them. source names the population; by default it's each sample's
+        source, or its source's name.
         """
         values = {name: [] for name in list(cls.scalar_columns) + cls.vector_columns}
         offsets, detectors, energies = [0], [], []
+        detected_offsets, detected_leaves, detected_known = [0], [], []
         for sample in samples:
+            leaves = getattr(sample, "detected_leaf_indices", None)
+            detected_known.append(leaves is not None)
+            leaves = np.asarray([] if leaves is None else leaves, dtype=np.int64)
+            detected_leaves.append(leaves.reshape(-1))
+            detected_offsets.append(detected_offsets[-1] + leaves.size)
             energy = np.asarray(sample.energy_per_detector, dtype=np.float64)
             if energy.shape != (n_detectors,):
                 raise ValueError(
@@ -195,6 +246,9 @@ class Responses:
             np.concatenate(detectors) if detectors else [],
             np.concatenate(energies) if energies else [],
             metadata,
+            detected_offsets,
+            np.concatenate(detected_leaves) if detected_leaves else [],
+            detected_known,
         )
 
     @classmethod
@@ -211,6 +265,9 @@ class Responses:
             for name in parts[0].values
         }
         hit_counts = np.concatenate([np.diff(part.hit_offsets) for part in parts])
+        detected_counts = np.concatenate(
+            [np.diff(part.detected_offsets) for part in parts]
+        )
         return cls(
             n_detectors,
             values,
@@ -218,15 +275,25 @@ class Responses:
             np.concatenate([part.hit_detectors for part in parts]),
             np.concatenate([part.hit_energies for part in parts]),
             metadata,
+            np.concatenate(([0], np.cumsum(detected_counts))),
+            np.concatenate([part.detected_leaves for part in parts]),
+            np.concatenate([part.detected_known for part in parts]),
         )
+
+    @staticmethod
+    def _picked(offsets, indices):
+        """New offsets, and positions in the flat array, of some subshowers' entries."""
+        counts = np.diff(offsets)[indices]
+        new_offsets = np.concatenate(([0], np.cumsum(counts)))
+        positions = np.repeat(offsets[indices] - new_offsets[:-1], counts)
+        positions += np.arange(new_offsets[-1])
+        return new_offsets, positions
 
     def select(self, which):
         """The subshowers a boolean mask, or array of indices, picks out."""
         indices = np.arange(len(self))[which]
-        counts = np.diff(self.hit_offsets)[indices]
-        offsets = np.concatenate(([0], np.cumsum(counts)))
-        positions = np.repeat(self.hit_offsets[indices] - offsets[:-1], counts)
-        positions += np.arange(offsets[-1])
+        offsets, positions = self._picked(self.hit_offsets, indices)
+        detected_offsets, detected = self._picked(self.detected_offsets, indices)
         return Responses(
             self.n_detectors,
             {name: column[indices] for name, column in self.values.items()},
@@ -234,6 +301,9 @@ class Responses:
             self.hit_detectors[positions],
             self.hit_energies[positions],
             self.metadata,
+            detected_offsets,
+            self.detected_leaves[detected],
+            self.detected_known[indices],
         )
 
     # ------------------------------------------------------------ reading
@@ -264,6 +334,21 @@ class Responses:
         energy[self.hit_detectors[start:end]] = self.hit_energies[start:end]
         return energy
 
+    @property
+    def keeps_detected_leaves(self):
+        """True if every subshower's detected leaves are known."""
+        return bool(self.detected_known.all())
+
+    def detected_leaf_indices(self, i):
+        """
+        History index labels of subshower i's leaves that hit some
+        detector, or None if they aren't known.
+        """
+        if not self.detected_known[i]:
+            return None
+        start, end = self.detected_offsets[i], self.detected_offsets[i + 1]
+        return self.detected_leaves[start:end].copy()
+
     def sample(self, i):
         """Subshower i, as a StoredSample."""
         values = {name: column[i] for name, column in self.values.items()}
@@ -279,6 +364,7 @@ class Responses:
             n_detected_leaves=int(values["n_detected_leaves"]),
             total_leaf_energy=float(values["total_leaf_energy"]),
             energy_per_detector=self.energy_per_detector(i),
+            detected_leaf_indices=self.detected_leaf_indices(i),
         )
 
     def samples(self):
@@ -297,6 +383,9 @@ class Responses:
             "hit_offsets": self.hit_offsets,
             "hit_detectors": self.hit_detectors,
             "hit_energies": self.hit_energies,
+            "detected_offsets": self.detected_offsets,
+            "detected_leaves": self.detected_leaves,
+            "detected_known": self.detected_known,
         }
         for name, column in self.values.items():
             arrays[f"value_{name}"] = column
@@ -311,11 +400,18 @@ class Responses:
     def load(cls, path):
         with np.load(path, allow_pickle=False) as data:
             version = int(data["format_version"])
-            if version != cls.FORMAT_VERSION:
+            if version not in (1, cls.FORMAT_VERSION):
                 raise ValueError(
                     f"{path} has format version {version}, not {cls.FORMAT_VERSION}"
                 )
             names = list(cls.scalar_columns) + cls.vector_columns
+            detected = [None, None, None]  # version 1 didn't keep them
+            if version >= 2:
+                detected = [
+                    data["detected_offsets"],
+                    data["detected_leaves"],
+                    data["detected_known"],
+                ]
             return cls(
                 int(data["n_detectors"]),
                 {name: data[f"value_{name}"] for name in names},
@@ -323,6 +419,7 @@ class Responses:
                 data["hit_detectors"],
                 data["hit_energies"],
                 json.loads(data["metadata"].item()),
+                *detected,
             )
 
     @classmethod

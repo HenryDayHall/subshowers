@@ -107,6 +107,91 @@ def test_select_concatenate_save_load(tmp_path):
     assert len(Responses.load(path)) == 0
 
 
+def test_detected_leaves(tmp_path):
+    rng = np.random.default_rng(4)
+    known = [made_up_sample(rng, 10, "a", hits) for hits in [2, 0, 3]]
+    for sample, leaves in zip(known, [[5, 9], [], [1, 2, 3]]):
+        sample.detected_leaf_indices = np.array(leaves)
+    unknown = [made_up_sample(rng, 10, "b", hits) for hits in [1, 2]]
+    with_leaves = Responses.from_samples(known, 10)
+    assert with_leaves.keeps_detected_leaves
+    assert with_leaves.detected_leaf_indices(0).tolist() == [5, 9]
+    assert with_leaves.detected_leaf_indices(1).tolist() == []
+    without = Responses.from_samples(unknown, 10)
+    assert not without.keeps_detected_leaves
+    assert without.detected_leaf_indices(0) is None
+
+    both = Responses.concatenate([with_leaves, without])
+    assert both.detected_known.tolist() == [True, True, True, False, False]
+    assert both.detected_leaf_indices(2).tolist() == [1, 2, 3]
+    picked = both.select([2, 4, 0])
+    assert picked.detected_leaf_indices(0).tolist() == [1, 2, 3]
+    assert picked.detected_leaf_indices(1) is None
+    assert picked.detected_leaf_indices(2).tolist() == [5, 9]
+    # they go through StoredSamples, and back
+    again = Responses.from_samples(picked.samples(), 10)
+    np.testing.assert_array_equal(again.detected_known, picked.detected_known)
+    np.testing.assert_array_equal(again.detected_leaves, picked.detected_leaves)
+
+    path = str(tmp_path / "responses.npz")
+    both.save(path)
+    loaded = Responses.load(path)
+    np.testing.assert_array_equal(loaded.detected_offsets, both.detected_offsets)
+    np.testing.assert_array_equal(loaded.detected_leaves, both.detected_leaves)
+    np.testing.assert_array_equal(loaded.detected_known, both.detected_known)
+
+    with pytest.raises(ValueError, match="aren't known"):
+        Responses(
+            10,
+            without.values,
+            without.hit_offsets,
+            without.hit_detectors,
+            without.hit_energies,
+            detected_offsets=[0, 1, 1],
+            detected_leaves=[7],
+            detected_known=[False, False],
+        )
+    with pytest.raises(ValueError, match="detected_offsets"):
+        Responses(
+            10,
+            without.values,
+            without.hit_offsets,
+            without.hit_detectors,
+            without.hit_energies,
+            detected_offsets=[0, 2],
+            detected_leaves=[7, 8],
+        )
+
+
+def test_load_version_1(tmp_path):
+    """Responses saved before detected leaves were kept still load, without them."""
+    rng = np.random.default_rng(5)
+    responses = Responses.from_samples([made_up_sample(rng, 10) for _ in range(3)], 10)
+    path = str(tmp_path / "old.npz")
+    arrays = {
+        "format_version": np.array(1),
+        "n_detectors": np.array(10),
+        "metadata": np.array('{"made": "before"}'),
+        "hit_offsets": responses.hit_offsets,
+        "hit_detectors": responses.hit_detectors,
+        "hit_energies": responses.hit_energies,
+    }
+    for name, column in responses.values.items():
+        arrays[f"value_{name}"] = column
+    np.savez_compressed(path, **arrays)
+    loaded = Responses.load(path)
+    assert len(loaded) == 3 and loaded.metadata == {"made": "before"}
+    assert not loaded.keeps_detected_leaves
+    for i in range(3):
+        np.testing.assert_array_equal(
+            loaded.energy_per_detector(i), responses.energy_per_detector(i)
+        )
+    arrays["format_version"] = np.array(7)
+    np.savez_compressed(path, **arrays)
+    with pytest.raises(ValueError, match="format version 7"):
+        Responses.load(path)
+
+
 def test_bad_responses():
     rng = np.random.default_rng(3)
     with pytest.raises(ValueError, match="shape"):
@@ -139,6 +224,12 @@ def test_dataset_samples(tmp_path):
         assert responses.values[name].tolist() == [
             getattr(sample, name) for sample in samples
         ]
+    assert responses.keeps_detected_leaves
+    for i, sample in enumerate(samples):
+        np.testing.assert_array_equal(
+            responses.detected_leaf_indices(i), sample.detected_leaf_indices
+        )
+        assert len(sample.detected_leaf_indices) == sample.n_detected_leaves
     record = observables.record_of(responses, array)
     expected = observables.new_record()
     for sample in samples:

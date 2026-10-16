@@ -44,6 +44,27 @@ from subshowers import subshowers as _subshowers
 _SAMPLED_COLUMNS = ["pdg", "x", "y", "z", "px", "py", "pz", "kinetic_energy", "time"]
 
 
+def history_columns(reader, names=_SAMPLED_COLUMNS):
+    """
+    The history's columns as numpy arrays, and a function giving the
+    positions in them of reader.data index labels. Indexing these is much
+    faster than indexing the DataFrame by label.
+    """
+    data = reader.data
+    columns = {name: data[name].to_numpy() for name in names}
+    index = data.index
+    if isinstance(index, _pd.RangeIndex) and index.start == 0 and index.step == 1:
+        return columns, _np.asarray
+
+    def positions_of(labels):
+        positions = index.get_indexer(_np.atleast_1d(labels))
+        if (positions < 0).any():
+            raise KeyError(f"not in the history: {labels}")
+        return positions
+
+    return columns, positions_of
+
+
 class DatasetSource:
     """
     One shower folder together with one set of subshowers.
@@ -248,24 +269,8 @@ class SubshowerSampler:
 
     @staticmethod
     def _columns(reader):
-        """
-        The history's columns as numpy arrays, and a function giving the
-        positions in them of reader.data index labels. Indexing these is much
-        faster than indexing the DataFrame by label.
-        """
-        data = reader.data
-        columns = {name: data[name].to_numpy() for name in _SAMPLED_COLUMNS}
-        index = data.index
-        if isinstance(index, _pd.RangeIndex) and index.start == 0 and index.step == 1:
-            return columns, _np.asarray
-
-        def positions_of(labels):
-            positions = index.get_indexer(_np.atleast_1d(labels))
-            if (positions < 0).any():
-                raise KeyError(f"not in the history: {labels}")
-            return positions
-
-        return columns, positions_of
+        """The history's columns, as history_columns gives them."""
+        return history_columns(reader)
 
     def _detect(self, reader, leaf_indices):
         """energy per detector and the indices of leaves that hit."""

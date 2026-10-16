@@ -156,10 +156,17 @@ def split_record(record, groups):
 
 
 def pool(records):
-    """One record holding the subshowers of several."""
-    pooled = new_record()
+    """
+    One record holding the subshowers of several, with the values every one
+    of them has (such as the ground observables of ground_observables).
+    """
+    records = list(records)
+    if not records:
+        return new_record()
+    keys = [key for key in records[0] if all(key in record for record in records)]
+    pooled = {key: [] for key in keys}
     for record in records:
-        for key in pooled:
+        for key in keys:
             pooled[key].extend(record[key])
     return pooled
 

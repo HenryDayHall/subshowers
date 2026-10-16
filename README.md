@@ -182,6 +182,10 @@ detectors:
 Leaving out `for_array` gives every station listed, including some since
 replaced at the same place, where a particle is counted twice.
 
+A `ground` section, which can be left out, describes the ground for the
+ground-level observables (see
+[Ground-level observables](#ground-level-observables)).
+
 `ShowerFolders` turns that into a list of shower folders:
 
 ```python
@@ -207,6 +211,8 @@ subshowers/
 ├── datasets.py        Which of the subshower sets a config asks for are made
 ├── observables.py     Observables of detector responses, and figures of them
 ├── population_plotting.py  Histograms and scatter plots for those figures
+├── ground.py          What subshowers put on the ground; GroundSummaries, which stores it
+├── ground_observables.py  Ground-level observables (lateral distributions, spectra, ...), and figures of them
 ├── plane.py           Particles crossing a horizontal detection plane
 ├── sample_plotting.py Matplotlib and plotly views of showers and responses
 ├── raw_save_load.py   Small HDF5 + yaml save/load helper
@@ -277,7 +283,9 @@ python scripts/plot_observables_from_config.py configs/default.yaml
 
 samples every subshower set the config asks for with the config's detector
 array, and plots observables of what the array sees: start conditions against
-deposited energy, multiplicity, and the size and shape of the deposits. It
+deposited energy, multiplicity, and the size and shape of the deposits; and
+of what the subshowers put on the ground (see
+[Ground-level observables](#ground-level-observables)). It
 lists the sets that are missing, and why, and plots the rest. The plots and a
 `report.txt` go in `plots/<run_name>` in the showers folder (or
 `--output-dir`):
@@ -315,6 +323,116 @@ fig = observables.distributions(
     }
 )
 ```
+
+### Ground-level observables
+
+The same subshowers are also measured where they reach the ground, for the
+observables air shower simulations are compared with at ground level (as
+when comparing versions of CORSIKA, or CORSIKA with and without FLUKA). For
+each grouping, the plotting script draws
+
+| Figure | What it shows |
+| --- | --- |
+| `ground_lateral_<frame>_axis_*` | Lateral distributions: particles per m² of e±, γ, μ± and hadrons against distance from the axis, and the energy the detectors read per m² of detector |
+| `ground_spectra_*` | Kinetic energy spectra of each kind of particle reaching the ground |
+| `ground_numbers_*` | How many of each reach the ground: the fraction of subshowers with at least N, the mean against start energy, and the relative fluctuations (as for the muon number) |
+| `ground_timing_<frame>_axis_*` | Arrival delays after a plane front moving along the axis at the speed of light, and their spread (the thickness of the shower front), against distance from the axis |
+| `ground_reference_<frame>_axis_*` | Readings at a reference distance from the axis, like the Telescope Array's S800: the detector signal there, and the densities of e± and μ± there against start energy |
+
+Lines are means over a group's subshowers, with a band of the standard error
+of the mean; arrival times are averaged over the particles instead.
+
+Each figure is drawn twice: of every particle reaching the ground, in
+`ground_*`, and of only the particles that hit a detector, in
+`ground_detected_*` (e.g. `ground_detected_lateral_subshower_axis_by_pdg.png`).
+The detected particles are counted the same way, in the same bins and per
+m² of the same area (of the shower plane, not of the detectors), so each
+detected curve is the part of the full one that the array observes. These
+are the metrics to compare a generative model against when the model only
+makes particles that reach detectors.
+
+The particles a subshower puts on the ground are its leaves, carried down in
+straight lines as the detector sampler carries them, and slowed by their
+mass. CORSIKA 8 writes particles to the history before deciding whether to
+track them, so leaves below its tracking cuts (0.5 MeV for e± and γ, 0.3
+GeV for muons and hadrons) aren't counted; nor are neutrinos. Energies are
+as the particles were made: losses on the way down aren't known. Times in
+the history are in seconds.
+
+Distances and delays are measured about each subshower's own axis (the line
+through its start particle along its direction), or with `--frame shower`
+about the shower's axis, so that each subshower's lateral distribution is
+its share of what an array around the shower's core reads. Distances are in
+the shower plane, and densities are per m² of it.
+
+The config's `ground` section sets the height of the ground (0 is CORSIKA's
+observation level), the kinetic energies below which particles aren't
+counted, and the reference distance in each frame. Left out, it's
+
+```yaml
+ground:
+  height: 0.0
+  min_kinetic_energy: {electrons: 5.0e-4, photons: 5.0e-4, muons: 0.3, hadrons: 0.3}
+  reference_distance: {subshower: 100.0, shower: 800.0}
+```
+
+A particle hits a detector if its straight line from where it was made
+crosses one, as for the detector responses, which record which leaves did.
+For the detected figures it's placed, like every particle, where its line
+meets the ground: where it meets the detector if the detectors lie on the
+ground, as `generate_at_ground` puts them. For an array above it, set the
+ground's `height` to the detectors'. Deposits count every leaf that hits a
+detector, but the detected figures leave out those below the tracking cuts,
+and neutrinos, so a few subshowers that deposit energy may put no counted
+particle on a detector.
+
+Each subshower is summarised by histograms with fixed bins, for both frames,
+so `--frame` only changes the plots. Each set's summaries are saved in
+`ground/` in the output folder, and used again while the set, the sampling
+options and the `ground` section stay the same. Those of the detected
+particles are saved in `ground_detected/`, and are worked out again whenever
+the responses are measured again, too. Responses saved before they recorded
+which leaves hit a detector are measured again.
+
+A generative model's subshowers are compared in the same way. Give each the
+start values, as for responses, and the particles it puts on the ground:
+`ground_pdg`, `ground_x`, `ground_y`, `ground_kinetic_energy` and, if the
+model gives them, `ground_time` (in seconds). With `primary_position`,
+`primary_direction` and `primary_time`, the shower's axis can be used too.
+For a model that only makes the particles that reach detectors, say so with
+`particles="detected"`, and compare it with the dataset's detected
+particles:
+
+```python
+from subshowers import ground_observables
+from subshowers.ground import GroundSummaries
+
+# saved_paths: the dataset's files in ground_detected/
+dataset = GroundSummaries.concatenate(GroundSummaries.load(path) for path in saved_paths)
+model = GroundSummaries.from_samples(
+    model_samples, dataset.settings, source="model", particles="detected"
+)
+by_group = {
+    "dataset": ground_observables.record_of(dataset, "subshower"),
+    "model": ground_observables.record_of(model, "subshower"),
+}
+fig = ground_observables.lateral_distributions(
+    by_group,
+    "subshower",
+    reference="dataset",
+    reference_distance=100.0,
+    particles="detected",
+)
+```
+
+Every figure function takes `particles`, `"all"` (the default) or
+`"detected"`. A record can hold both kinds: those of all particles are
+under keys starting `ground_`, and those of detected particles under keys
+starting `detected_`. A group without the kind a figure draws is listed in
+its legend, but has no lines. `reference` adds panels of each group's ratio
+to it under the lateral distributions and energy spectra. Passing
+`record_of` each population's `Responses`, and the array, adds the detector
+signal.
 
 ## Plotting showers
 

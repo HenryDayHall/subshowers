@@ -15,6 +15,20 @@ same. So plots can be remade quickly, and the dataset can be compared later
 with other populations measured with the same array, such as subshowers from
 a generative model (see subshowers.responses.Responses).
 
+What the same subshowers put on the ground is summarised too, for the
+observables used to compare air shower simulations at ground level (see
+subshowers.ground): lateral distributions, energy spectra, particle numbers,
+arrival times and readings at a reference distance. The summaries are saved
+in ground/, and used again while the set, the sampling options and the
+config's ground section stay the same. Distances and delays are measured
+about each subshower's own axis, or with --frame shower, about the shower's.
+
+The same observables are worked out of only the particles that hit a
+detector, which are all a generative model trained on what reaches the
+detectors makes, and plotted in ground_detected_* figures. Those summaries
+are saved in ground_detected/, and are made again whenever the responses
+are, as well as when the ground section changes.
+
 The plots for each energy cut go in e<cut>/, grouped by the primary energy of
 the shower and by the particle that starts the subshower. With more than one
 cut, all_cuts/ compares the cuts.
@@ -36,7 +50,15 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
-from subshowers import datasets, detector, generation, observables  # noqa: E402
+from subshowers import (  # noqa: E402
+    datasets,
+    detector,
+    generation,
+    ground,
+    ground_observables,
+    observables,
+)
+from subshowers.ground import GroundSettings, GroundSummaries  # noqa: E402
 from subshowers.responses import Responses  # noqa: E402
 from subshowers.sample_plotting import show_subshower  # noqa: E402
 from subshowers.sampling import SubshowerSampler  # noqa: E402
@@ -54,6 +76,72 @@ FIGURES = [  # (file name, function, title)
     ("C", observables.observables_C, "Average per-sample deposit spectra"),
     ("distributions", observables.distributions, "Distributions of observables"),
 ]
+# (file name, title, whether it's measured about an axis, and a function
+# making it from (by_group, frame, reference distance, title, particles)).
+# Each is drawn of all the particles reaching the ground, in ground_<name>,
+# and of only those that hit a detector, in ground_detected_<name>; titles
+# say which with {where}.
+GROUND_FIGURES = [
+    (
+        "lateral",
+        "Lateral distributions of particles {where}",
+        True,
+        lambda by_group, frame, distance, title, particles: (
+            ground_observables.lateral_distributions(
+                by_group,
+                frame,
+                reference_distance=distance,
+                title=title,
+                particles=particles,
+            )
+        ),
+    ),
+    (
+        "spectra",
+        "Energy spectra of particles {where}",
+        False,
+        lambda by_group, frame, distance, title, particles: (
+            ground_observables.energy_spectra(
+                by_group, title=title, particles=particles
+            )
+        ),
+    ),
+    (
+        "numbers",
+        "Numbers of particles {where}",
+        False,
+        lambda by_group, frame, distance, title, particles: (
+            ground_observables.particle_numbers(
+                by_group, title=title, particles=particles
+            )
+        ),
+    ),
+    (
+        "timing",
+        "Arrival times of particles {where}",
+        True,
+        lambda by_group, frame, distance, title, particles: (
+            ground_observables.arrival_times(
+                by_group, frame, title=title, particles=particles
+            )
+        ),
+    ),
+    (
+        "reference",
+        "Readings at the reference distance, of particles {where}",
+        True,
+        lambda by_group, frame, distance, title, particles: (
+            ground_observables.readings_at_reference(
+                by_group, frame, distance, title, particles=particles
+            )
+        ),
+    ),
+]
+# where each kind of particle reaches, and the start of its figures' names
+GROUND_KINDS = {
+    "all": ("on the ground", "ground"),
+    "detected": ("on a detector", "ground_detected"),
+}
 
 
 class Report:
@@ -108,6 +196,13 @@ def parse_args():
         action="store_true",
         help="plot only the subshowers that deposited energy in some detector",
     )
+    parser.add_argument(
+        "--frame",
+        choices=ground.FRAMES,
+        default="subshower",
+        help="measure ground distances and delays about each subshower's own axis,"
+        " or about the shower's (default: subshower)",
+    )
     args = parser.parse_args()
     if args.max_subshowers is not None and args.max_subshowers < 1:
         parser.error("--max-subshowers must be at least 1")
@@ -133,6 +228,24 @@ def describe_detector(config, array):
     return f"{name}({listed}), {len(array)} detectors"
 
 
+def describe_energy(gev):
+    if 0 < gev < 0.1:
+        return f"{gev * 1e3:g} MeV"
+    return f"{gev:g} GeV"
+
+
+def describe_ground(settings, frame):
+    minimum = ", ".join(
+        f"{ground.SPECIES_LABELS[name]} {describe_energy(energy)}"
+        for name, energy in settings.min_kinetic_energy.items()
+    )
+    return (
+        f"z = {settings.height:g} m, counting particles above {minimum};"
+        f" readings at {settings.reference_distance[frame]:g} m from the"
+        f" {frame} axis"
+    )
+
+
 def primary_label(shower):
     """A shower's group: its primary energy, or its folder if that's unknown."""
     if shower.energy_text is not None:
@@ -140,11 +253,14 @@ def primary_label(shower):
     return shower.subfolder
 
 
-def responses_path(output_dir, subshower_set):
+def responses_path(output_dir, subshower_set, folder="responses"):
     name = subshower_set.shower.subfolder.replace("/", "__")
-    return os.path.join(
-        output_dir, "responses", f"{name}_e{subshower_set.energy_cut}.npz"
-    )
+    return os.path.join(output_dir, folder, f"{name}_e{subshower_set.energy_cut}.npz")
+
+
+def ground_path(output_dir, subshower_set, particles="all"):
+    folder = "ground" if particles == "all" else f"ground_{particles}"
+    return responses_path(output_dir, subshower_set, folder=folder)
 
 
 def responses_settings(subshower_set, config, args):
@@ -165,6 +281,21 @@ def responses_settings(subshower_set, config, args):
     return json.loads(json.dumps(settings, default=str))
 
 
+def ground_settings_for(settings, ground_settings, particles="all"):
+    """
+    What decides a set's ground summaries: what picks its subshowers (the
+    responses' settings, but for the detector unless the summaries are of
+    the detected particles) and the ground settings.
+    """
+    chosen = {
+        key: value
+        for key, value in settings.items()
+        if key != "detector" or particles == "detected"
+    }
+    chosen["ground"] = ground_settings.as_dict()
+    return json.loads(json.dumps(chosen, default=str))
+
+
 def progress(samples, total, label, every=60.0):
     """Pass samples on, printing progress at most every `every` seconds."""
     start = last = time.monotonic()
@@ -180,19 +311,38 @@ def progress(samples, total, label, every=60.0):
             last = now
 
 
+def saved_with(path, settings, kind):
+    """
+    What a file holds, read as kind (Responses or GroundSummaries), if it was
+    saved with these settings; otherwise None.
+    """
+    if not os.path.isfile(path):
+        return None
+    try:
+        saved = kind.read_metadata(path)
+        if saved.get("settings") == settings:
+            return kind.load(path)
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
 def measure(check, array, settings, path, args, reuse):
     """
-    The detector responses to one subshower set, and how they were got: read
-    from path if they were saved with the same settings, otherwise measured
-    and saved there.
+    The detector responses to one subshower set, how they were got, and the
+    set's DatasetSource if it was opened to measure them (None if they were
+    read): the responses are read from path if they were saved with the same
+    settings and record which leaves hit a detector, otherwise measured and
+    saved there. The source is left open, for ground summaries, so release
+    it when they're made.
     """
-    if reuse and os.path.isfile(path):
-        try:
-            saved = Responses.read_metadata(path)
-        except (OSError, ValueError, KeyError):
-            saved = None
-        if saved is not None and saved.get("settings") == settings:
-            return Responses.load(path), "saved earlier"
+    why = ""
+    if reuse:
+        saved = saved_with(path, settings, Responses)
+        if saved is not None:
+            if saved.keeps_detected_leaves:
+                return saved, "saved earlier", None
+            why = " (the saved ones didn't record which leaves hit a detector)"
     start = time.monotonic()
     source = check.source()
     n_in_set = len(source)  # reads the set, and the shower's history
@@ -211,9 +361,52 @@ def measure(check, array, settings, path, args, reuse):
             "measured": time.strftime("%Y-%m-%d %H:%M:%S"),
         },
     )
-    source.release()
     responses.save(path)
-    return responses, f"measured in {describe_seconds(time.monotonic() - start)}"
+    how = f"measured in {describe_seconds(time.monotonic() - start)}{why}"
+    return responses, how, source
+
+
+def summarise_ground(
+    check, responses, settings, ground_settings, path, reuse, source, particles="all"
+):
+    """
+    What the subshowers of responses put on the ground, as GroundSummaries
+    of the same subshowers in the same order, how they were got, and the
+    set's DatasetSource if it's open: read from path if they were saved with
+    the same settings, otherwise worked out (opening the source if it isn't
+    open) and saved there. With particles="detected", only of the particles
+    that hit a detector, as the responses record them.
+    """
+    if reuse:
+        saved = saved_with(path, settings, GroundSummaries)
+        if saved is not None:
+            try:
+                ground.check_aligned(saved, responses)
+                return saved, "as worked out before", source
+            except ValueError:
+                pass  # not the same subshowers, so work them out again
+    start = time.monotonic()
+    if source is None:
+        source = check.source()
+    n_subshowers = len(responses)
+    options = dict(
+        settings=ground_settings,
+        metadata={
+            "settings": settings,
+            "worked_out": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        progress=lambda chosen: progress(
+            chosen, n_subshowers, f"{check.label} ({GROUND_KINDS[particles][0]})"
+        ),
+    )
+    if particles == "detected":
+        summaries = GroundSummaries.detected_in(source, responses, **options)
+    else:
+        numbers = responses.values["subshower_number"]
+        summaries = GroundSummaries.from_source(source, numbers, **options)
+    summaries.save(path)
+    how = f"worked out in {describe_seconds(time.monotonic() - start)}"
+    return summaries, how, source
 
 
 def coordinate_ranges(responses, array):
@@ -239,13 +432,31 @@ def save(fig, path, written):
     written.append(path)
 
 
-def plot_groups(by_group, folder, suffix, context, written):
-    """observables A, B, C and distributions of some groups of subshowers."""
+def plot_groups(by_group, folder, suffix, context, written, ground_options=None):
+    """
+    observables A, B, C and distributions of some groups of subshowers, and
+    with ground_options, (frame, reference distance, kinds), their ground
+    figures of each kind of particle in kinds ("all", "detected").
+    """
     if not by_group:
         return
     for name, function, title in FIGURES:
         fig = function(by_group, title=f"{title}\n{context}")
         save(fig, os.path.join(folder, f"{name}_{suffix}.png"), written)
+    if ground_options is None:
+        return
+    frame, distance, kinds = ground_options
+    for kind in kinds:
+        start = GROUND_KINDS[kind][1]
+        where = ground_observables.PARTICLES[kind]["where"]
+        for name, title, about_axis, function in GROUND_FIGURES:
+            title = title.format(where=where)
+            name = f"{start}_{name}"
+            if about_axis:
+                title = f"{title}, about the {frame} axis"
+                name = f"{name}_{frame}_axis"
+            fig = function(by_group, frame, distance, f"{title}\n{context}", kind)
+            save(fig, os.path.join(folder, f"{name}_{suffix}.png"), written)
 
 
 def plot_examples(responses, array, path, context, seed, written):
@@ -286,9 +497,32 @@ def plot_examples(responses, array, path, context, seed, written):
     save(fig, path, written)
 
 
-def plot_cut(responses, array, folder, context, primaries, seed, report, written):
-    """Plots for one energy cut; returns the record of its subshowers."""
+def plot_cut(
+    responses,
+    summaries,
+    array,
+    folder,
+    context,
+    primaries,
+    seed,
+    report,
+    written,
+    ground_options,
+):
+    """
+    Plots for one energy cut, from the responses of its subshowers and, with
+    ground_options, their ground summaries, {kind: GroundSummaries} for the
+    kinds ground_options names; returns the record of them.
+    """
     record = observables.record_of(responses, array)
+    if ground_options is not None:
+        frame, _, kinds = ground_options
+        for n, kind in enumerate(kinds):
+            # the detector signal is the same for every kind, so it's added once
+            signal = (responses, array) if n == 0 else (None, None)
+            record.update(
+                ground_observables.entries_of(summaries[kind], frame, *signal)
+            )
     sources = responses.values["source"]
     pdgs = responses.values["start_pdg"]
     by_primary = [primaries[source] for source in sources]
@@ -298,6 +532,7 @@ def plot_cut(responses, array, folder, context, primaries, seed, report, written
         "by_primary",
         f"{context}, by primary energy",
         written,
+        ground_options,
     )
     by_pdg = observables.fold_small_groups([f"pdg {pdg}" for pdg in pdgs])
     plot_groups(
@@ -306,6 +541,7 @@ def plot_cut(responses, array, folder, context, primaries, seed, report, written
         "by_pdg",
         f"{context}, by start particle",
         written,
+        ground_options,
     )
     electrons = np.isin(pdgs, ELECTRONS_AND_POSITRONS)
     plot_groups(
@@ -319,6 +555,7 @@ def plot_cut(responses, array, folder, context, primaries, seed, report, written
         "by_primary_electrons_and_positrons",
         f"{context}, electrons and positrons by primary energy",
         written,
+        ground_options,
     )
     plot_examples(
         responses, array, os.path.join(folder, "examples.png"), context, seed, written
@@ -343,9 +580,12 @@ def main():
     report = Report()
     try:
         array = detector.from_config(config)
+        ground_settings = GroundSettings.from_config(config)
         showers_folder = generation.showers_folder(config)
         queued = generation.queued_outputs(showers_folder) or {}
         checks = datasets.check_subshower_sets(config, queued)
+    except ground.GroundConfigError as error:
+        sys.exit(f"Can't plot from {args.config_file}: ground: {error}")
     except (detector.DetectorConfigError, generation.ConfigError) as error:
         sys.exit(f"Can't plot from {args.config_file}: {error}")
     except KeyError as error:
@@ -365,6 +605,7 @@ def main():
     unseeded = detector.is_unseeded(config)
     report(f"Config: {os.path.abspath(args.config_file)}")
     report(f"Detector: {describe_detector(config, array)}")
+    report(f"Ground: {describe_ground(ground_settings, args.frame)}")
     report(f"Output: {output_dir}")
     if unseeded:
         report(
@@ -375,8 +616,8 @@ def main():
     if checks and not checks[0].subshower_set.leaves_only:
         report(
             "subshowers: leaves_only is false, but the sampler takes every"
-            " particle in a subshower to be a leaf, so deposits count"
-            " particles that went on to make others."
+            " particle in a subshower to be a leaf, so deposits, and particles"
+            " on the ground, count particles that went on to make others."
         )
     report()
 
@@ -393,36 +634,68 @@ def main():
             " what's missing."
         )
 
-    measured = []  # (check, responses)
+    measured = []  # (check, responses, {kind: ground summaries})
     if ready:
         report()
-        report("Detector responses:")
+        report("Detector responses, and what reaches the ground and the detectors:")
     for check in ready:
-        path = responses_path(output_dir, check.subshower_set)
+        source = None
         try:
-            settings = responses_settings(check.subshower_set, config, args)
-            responses, how = measure(
-                check,
-                array,
-                settings,
-                path,
-                args,
-                reuse=not (args.recompute or unseeded),
-            )
-        except Exception as error:  # one unreadable set shouldn't stop the rest
+            try:
+                settings = responses_settings(check.subshower_set, config, args)
+                responses, how, source = measure(
+                    check,
+                    array,
+                    settings,
+                    responses_path(output_dir, check.subshower_set),
+                    args,
+                    reuse=not (args.recompute or unseeded),
+                )
+            except Exception as error:  # one unreadable set shouldn't stop the rest
+                report(
+                    f"  {check.label}: couldn't be read,"
+                    f" {type(error).__name__}: {error}"
+                )
+                continue
+            # what reached the detectors is only known again if the responses were
+            responses_reused = source is None
+            n_in_set = responses.metadata.get("n_subshowers_in_set", len(responses))
+            n_detected = int(responses.detected.sum())
+            of = "" if len(responses) == n_in_set else f" chosen from {n_in_set}"
             report(
-                f"  {check.label}: couldn't be read, {type(error).__name__}: {error}"
+                f"  {check.label}: {len(responses)} subshowers{of},"
+                f" {n_detected} ({percent(n_detected, len(responses))}) deposited"
+                f" energy; {how}"
             )
-            continue
-        n_in_set = responses.metadata.get("n_subshowers_in_set", len(responses))
-        n_detected = int(responses.detected.sum())
-        of = "" if len(responses) == n_in_set else f" chosen from {n_in_set}"
-        report(
-            f"  {check.label}: {len(responses)} subshowers{of},"
-            f" {n_detected} ({percent(n_detected, len(responses))}) deposited"
-            f" energy; {how}"
-        )
-        measured.append((check, responses))
+            summaries = {}
+            for kind, (where, _) in GROUND_KINDS.items():
+                # nor should the ground stop the responses being plotted
+                try:
+                    summaries[kind], ground_how, source = summarise_ground(
+                        check,
+                        responses,
+                        ground_settings_for(settings, ground_settings, kind),
+                        ground_settings,
+                        ground_path(output_dir, check.subshower_set, kind),
+                        reuse=not args.recompute
+                        and (kind == "all" or responses_reused),
+                        source=source,
+                        particles=kind,
+                    )
+                    n_there = int(summaries[kind].reaches_ground.sum())
+                    report(
+                        f"    {n_there} ({percent(n_there, len(responses))})"
+                        f" put particles {where}; {ground_how}"
+                    )
+                except Exception as error:
+                    report(
+                        f"    what reaches {where[3:]} couldn't be worked out,"
+                        f" {type(error).__name__}: {error}"
+                    )
+            measured.append((check, responses, summaries))
+        finally:
+            if source is not None:
+                source.release()
 
     report_path = os.path.join(output_dir, "report.txt")
     if not measured:
@@ -433,26 +706,47 @@ def main():
 
     primaries = {
         check.subshower_set.shower.subfolder: primary_label(check.subshower_set.shower)
-        for check, _ in measured
+        for check, _, _ in measured
     }
     particle = os.path.basename(showers_folder)
     only = ", detected only" if args.detected_only else ""
     by_cut = {}
-    for check, responses in measured:
-        by_cut.setdefault(check.subshower_set.energy_cut, []).append(responses)
+    for check, responses, summaries in measured:
+        by_cut.setdefault(check.subshower_set.energy_cut, []).append(
+            (responses, summaries)
+        )
     written = []
     records = {}
+    plotted_kinds = []  # the kinds of ground figures each cut plotted has
     for cut, parts in by_cut.items():
-        responses = Responses.concatenate(parts)
+        responses = Responses.concatenate(part[0] for part in parts)
+        summaries = {
+            kind: GroundSummaries.concatenate(part[1][kind] for part in parts)
+            for kind in GROUND_KINDS
+            if all(kind in part[1] for part in parts)
+        }
         if args.detected_only:
+            summaries = {
+                kind: kept.select(responses.detected)
+                for kind, kept in summaries.items()
+            }
             responses = responses.select(responses.detected)
         report()
         report(f"Energy cut {cut} GeV: plotting {len(responses)} subshowers")
         if not len(responses):
             continue
+        for kind, (where, _) in GROUND_KINDS.items():
+            if kind not in summaries:
+                report(
+                    f"  without what reaches {where[3:]}, as that couldn't be"
+                    " worked out for every set"
+                )
+        kinds = list(summaries)
+        plotted_kinds.append(kinds)
         context = f"{particle}, energy cut {cut} GeV{only}"
         records[f"cut {cut} GeV"] = plot_cut(
             responses,
+            summaries,
             array,
             os.path.join(output_dir, f"e{cut}"),
             context,
@@ -460,16 +754,27 @@ def main():
             args.seed,
             report,
             written,
+            (
+                (args.frame, ground_settings.reference_distance[args.frame], kinds)
+                if kinds
+                else None
+            ),
         )
     if len(records) > 1:
         report()
         report(f"Comparing {len(records)} energy cuts")
+        kinds = [kind for kind in GROUND_KINDS if all(kind in k for k in plotted_kinds)]
         plot_groups(
             records,
             os.path.join(output_dir, "all_cuts"),
             "by_cut",
             f"{particle}, by energy cut{only}",
             written,
+            (
+                (args.frame, ground_settings.reference_distance[args.frame], kinds)
+                if kinds
+                else None
+            ),
         )
 
     folders = {}
