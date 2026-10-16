@@ -48,3 +48,31 @@ detectors:
   #   name: generate_pierre_auger
   #   for_array: stop
 
+
+ground:
+  # What reaches the ground, for the ground-level observables plotted by
+  # scripts/plot_observables_from_config.py (see subshowers/ground.py). The
+  # whole section can be left out; these are the defaults.
+
+  # Height of the ground, in the history's coordinates (m), where z = 0 is
+  # CORSIKA's observation level. Leaves are carried down to it in straight
+  # lines.
+  height: 0.0
+
+  # Particles below these kinetic energies (GeV) aren't counted. CORSIKA 8
+  # writes particles to the history before cutting them, and these are the
+  # cuts c8_air_shower_with_history makes by default (--emcut, --mucut,
+  # --hadcut).
+  min_kinetic_energy:
+    electrons: 5.0e-4
+    photons: 5.0e-4
+    muons: 0.3
+    hadrons: 0.3
+
+  # Distance (m) from the axis at which readings are taken, like the
+  # Telescope Array's S800 (800 m from the shower's axis): about each
+  # subshower's own axis, and about the shower's.
+  reference_distance:
+    subshower: 100.0
+    shower: 800.0
+
