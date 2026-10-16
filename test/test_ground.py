@@ -322,6 +322,150 @@ def test_settings():
         GroundSettings.from_config({"ground": [1]})
 
 
+def test_height_from_the_detectors():
+    raised = detector.HorizontalCircles(
+        np.array([[0.0, 0, 10], [50, 0, 40], [0, 50, 20]]), 5.0
+    )
+    assert ground.detector_height(raised) == 20.0
+    assert ground.detector_height(detector.generate_at_ground(5, seed=0)) == 0.0
+    auger = detector.generate_pierre_auger("stop")
+    assert ground.detector_height(auger) == pytest.approx(
+        np.median(auger.centers[:, 2])
+    )
+    # without a height, the ground is at the detectors'
+    for config in [{}, {"ground": None}, {"ground": {"height": None}}]:
+        assert GroundSettings.from_config(config, raised).height == 20.0
+    with_cuts = {"ground": {"min_kinetic_energy": {"muons": 1.0}}}
+    settings = GroundSettings.from_config(with_cuts, raised)
+    assert settings.height == 20.0 and settings.min_kinetic_energy["muons"] == 1.0
+    # a height the config gives is used, even 0
+    assert GroundSettings.from_config({"ground": {"height": 0}}, raised).height == 0
+    # and without an array, it's CORSIKA's observation level
+    assert GroundSettings.from_config({"ground": {"height": None}}).height == 0
+
+
+class Unplaced:
+    """An array of a kind leaves_to_detectors doesn't know the planes of."""
+
+    centers = np.array([[0.0, 0, 30], [0, 0, 50]])
+
+    def __len__(self):
+        return 2
+
+    def hit_any(self, positions, directions):
+        return np.ones((len(positions), 2), dtype=bool)
+
+
+def test_leaves_to_detectors():
+    # two detectors stacked above one another, and one more at the side
+    circles = detector.HorizontalCircles(
+        np.array([[0.0, 0, 200], [0, 0, 100], [500, 0, 50]]), 10.0
+    )
+    position = [[0.0, 0, 1000], [500, 0, 1000], [0, 0, 150], [300, 0, 1000]]
+    momentum = [DOWN, DOWN, DOWN, DOWN]
+    pdg, where, kinetic_energy, when = ground.leaves_to_detectors(
+        [22, 22, 22, 22], position, momentum, [1.0] * 4, [1e-6] * 4, circles
+    )
+    # the first reaches the upper of the two stacked detectors, the third
+    # starts between them, and the last misses
+    np.testing.assert_allclose(where, [[0, 0, 200], [500, 0, 50], [0, 0, 100]])
+    np.testing.assert_allclose(when, 1e-6 + np.array([800, 950, 50]) / C)
+    assert pdg.tolist() == [22, 22, 22] and kinetic_energy.tolist() == [1.0] * 3
+
+    # a slower muon, at an angle
+    muon_mass = ground.MASSES[13]
+    slant = np.array([0.0, 0.6, -0.8])
+    _, where, _, when = ground.leaves_to_detectors(
+        [13], [[500, -600, 850]], [slant * 2], [muon_mass], [0.0], circles
+    )
+    np.testing.assert_allclose(where, [[500, 0, 50]])
+    np.testing.assert_allclose(when, [1000 / (C * np.sqrt(3) / 2)])
+
+    # a tilted triangle: down from above its middle, onto its plane
+    tilted = detector.Triangles(
+        np.array([[[-10.0, -10, 0], [10, -10, 0], [0, 10, 20]]])
+    )
+    _, where, _, _ = ground.leaves_to_detectors(
+        [22], [[0.0, 0, 100]], [DOWN], [1.0], [0.0], tilted
+    )
+    np.testing.assert_allclose(where, [[0, 0, 10]])
+
+    # arrays whose planes aren't known here: to their height
+    _, where, _, _ = ground.leaves_to_detectors(
+        [22], [[3.0, 4, 100]], [DOWN], [1.0], [0.0], Unplaced()
+    )
+    np.testing.assert_allclose(where, [[3, 4, 40]])
+
+    # nothing in, nothing out
+    placed = ground.leaves_to_detectors(
+        [], np.zeros((0, 3)), np.zeros((0, 3)), [], [], circles
+    )
+    assert all(len(values) == 0 for values in placed)
+
+
+def test_flat_detectors_are_the_ground():
+    """On detectors at one level, particles are placed just as on the ground there."""
+    rng = np.random.default_rng(7)
+    n = 5000
+    position = np.column_stack(
+        [rng.normal(0, 800, n), rng.normal(0, 800, n), rng.uniform(1, 5000, n)]
+    )
+    momentum = np.column_stack(
+        [rng.normal(0, 0.3, n), rng.normal(0, 0.3, n), -rng.uniform(0.2, 1, n)]
+    )
+    pdg = rng.choice([11, 22, 13, 2212], n)
+    kinetic_energy = 10 ** rng.uniform(-3, 1, n)
+    time = rng.uniform(0, 1e-5, n)
+    for array, height in [
+        (detector.generate_at_ground(400, 2000.0, 150.0, 20.0, seed=0), 0.0),
+        (
+            detector.HorizontalCircles(
+                np.column_stack(
+                    [rng.uniform(-2000, 2000, (300, 2)), np.full(300, 70.0)]
+                ),
+                40.0,
+            ),
+            70.0,
+        ),
+    ]:
+        hit = array.hit_any(position, momentum).any(axis=1)
+        assert hit.sum() > 50
+        placed = ground.leaves_to_detectors(
+            pdg, position, momentum, kinetic_energy, time, array, chunk_size=777
+        )
+        expected = ground.leaves_to_ground(
+            pdg[hit],
+            position[hit],
+            momentum[hit],
+            kinetic_energy[hit],
+            time[hit],
+            height,
+        )
+        for values, wanted in zip(placed, expected):
+            np.testing.assert_array_equal(values, wanted)
+
+
+def test_model_heights():
+    """A model's particles can be at the heights of the detectors they hit."""
+    rng = np.random.default_rng(8)
+    sample = ground_sample(rng, n_particles=1)
+    sample.ground_pdg = np.array([22])
+    sample.start_position = np.array([0.0, 0.0, 1000.0])
+    sample.start_direction = DOWN
+    sample.ground_x, sample.ground_y = np.array([30.0]), np.array([40.0])
+    sample.ground_time = np.array([1000 / C])
+    low = GroundSummaries.from_samples([sample])
+    sample.ground_z = np.array([100.0])
+    high = GroundSummaries.from_samples([sample])
+    # the same distance from a vertical axis, but 100 m nearer its start
+    np.testing.assert_array_equal(low.histograms["lateral"], high.histograms["lateral"])
+    later = (
+        high.histograms["delay_sum"][0, 0, 1].sum()
+        - low.histograms["delay_sum"][0, 0, 1].sum()
+    )
+    assert later == pytest.approx(100 / C * 1e9)
+
+
 # ------------------------------------------------------------- the dataset
 
 
@@ -405,12 +549,22 @@ def landing(tmp_path_factory):
         folder, output_path=os.path.join(folder, "subshowers_e100.0.h5"), name="e1e5_0"
     )
     samples = list(SubshowerSampler([source], array, seed=1).iter_epoch())
-    return source, samples, Responses.from_samples(samples, len(array))
+    return source, samples, Responses.from_samples(samples, len(array)), array
 
 
 def test_detected_in(landing):
-    source, samples, responses = landing
+    source, samples, responses, array = landing
     detected = GroundSummaries.detected_in(source, responses)
+    # the array is flat, so placing particles on their detectors changes nothing
+    on_detectors = GroundSummaries.detected_in(source, responses, array=array)
+    for name in ground.HISTOGRAMS:
+        np.testing.assert_array_equal(
+            on_detectors.histograms[name], detected.histograms[name]
+        )
+    with pytest.raises(ValueError, match="detectors"):
+        GroundSummaries.detected_in(
+            source, responses, array=detector.generate_at_ground(3, seed=0)
+        )
     everything = GroundSummaries.from_source(
         source, responses.values["subshower_number"]
     )
@@ -456,8 +610,55 @@ def test_detected_in(landing):
     assert detected.select([0, 1]).particles == "detected"
 
 
+def test_detected_on_raised_detectors(landing):
+    """Detectors at different heights: particles go where they hit them."""
+    source = landing[0]
+    rng = np.random.default_rng(9)
+    grid = np.array(
+        [[x, y] for x in range(-900, 901, 60) for y in range(-900, 901, 60)], float
+    )
+    heights = 150 + 0.15 * grid[:, 0] + rng.normal(0, 5, len(grid))
+    array = detector.HorizontalCircles(np.column_stack([grid, heights]), 20.0)
+    samples = list(SubshowerSampler([source], array, seed=1).iter_epoch())
+    responses = Responses.from_samples(samples, len(array))
+    detected = GroundSummaries.detected_in(source, responses, array=array)
+    at_ground = GroundSummaries.detected_in(source, responses)
+    assert detected.reaches_ground.sum() > 3
+
+    data = source.reader.data
+    differs = False
+    for i in np.flatnonzero(detected.reaches_ground):
+        rows = data.loc[samples[i].detected_leaf_indices]
+        values = {name: column[i] for name, column in detected.values.items()}
+        placed = ground.leaves_to_detectors(
+            rows["pdg"].to_numpy(),
+            rows[["x", "y", "z"]].to_numpy(),
+            rows[["px", "py", "pz"]].to_numpy(),
+            rows["kinetic_energy"].to_numpy(),
+            rows["time"].to_numpy(),
+            array,
+        )
+        # every particle is on a detector, at its height
+        offsets = placed[1][:, None, :2] - array.centers[None, :, :2]
+        on = (np.hypot(*np.moveaxis(offsets, -1, 0)) <= 20 + 1e-6) & np.isclose(
+            placed[1][:, None, 2], array.centers[None, :, 2]
+        )
+        assert on.any(axis=1).all()
+        expected = ground.summarise(*placed, axes=GroundSummaries._axes_of(values))
+        for name in ground.HISTOGRAMS:
+            np.testing.assert_allclose(
+                detected.histograms[name][i], expected[name], equal_nan=True
+            )
+        differs |= not np.array_equal(
+            np.nan_to_num(detected.histograms["delay_sum"][i]),
+            np.nan_to_num(at_ground.histograms["delay_sum"][i]),
+        )
+    # placed at z = 0 instead, their delays come out differently
+    assert differs
+
+
 def test_detected_in_needs_detected_leaves(landing):
-    source, samples, responses = landing
+    source, samples, responses, _ = landing
     stripped = []
     for sample in samples[:3]:
         fields = vars(sample).copy()

@@ -35,7 +35,12 @@ in seconds, and delays here are in nanoseconds.
 The same summaries can be made of only the leaves that hit some detector,
 as responses.Responses records them (GroundSummaries.detected_in): the part
 of each summary that a detector array observes, which is what a generative
-model that only makes particles reaching detectors should reproduce.
+model that only makes particles reaching detectors should reproduce. Those
+particles are placed where they hit their detectors, at the detectors' own
+heights, and by default (GroundSettings.from_config) the ground is at the
+detectors' height too, so for an array on one level, such as
+detector.generate_at_ground makes, each detected particle is just where it
+reaches the ground.
 """
 
 import json
@@ -156,7 +161,8 @@ class GroundSettings:
     readings are taken. Missing entries take the defaults.
 
     height : float
-        Height of the ground, in the history's coordinates (m).
+        Height of the ground, in the history's coordinates (m). from_config
+        takes it from the detector array if the config leaves it out.
     min_kinetic_energy : dict
         {species: GeV} below which particles aren't counted.
     reference_distance : dict
@@ -214,11 +220,17 @@ class GroundSettings:
         return filled
 
     @classmethod
-    def from_config(cls, config):
-        """The settings in a config's ground section, which may be left out."""
+    def from_config(cls, config, array=None):
+        """
+        The settings in a config's ground section, which may be left out.
+        Without a height, the ground is at the height of array, the detector
+        array the config describes (detector_height), if it's given, so that
+        what reaches the ground is what reaches the detectors' level; and
+        otherwise at 0, CORSIKA's observation level.
+        """
         section = config.get("ground") if isinstance(config, dict) else None
         if section is None:
-            return cls()
+            section = {}
         if not isinstance(section, dict):
             raise GroundConfigError(
                 f"the ground section must be a mapping, not {section!r}"
@@ -231,6 +243,10 @@ class GroundSettings:
                 f"the ground section has {unknown}; it can have height,"
                 " min_kinetic_energy and reference_distance"
             )
+        if section.get("height") is None and array is not None:
+            section = {**section, "height": detector_height(array)}
+        elif section.get("height") is None:
+            section = {key: value for key, value in section.items() if key != "height"}
         return cls(**section)
 
     def as_dict(self):
@@ -375,6 +391,108 @@ def leaves_to_ground(pdg, position, momentum, kinetic_energy, time, height=0.0):
         position, momentum, time, speed, height
     )
     return pdg[reaches], ground_position, kinetic_energy[reaches], ground_time
+
+
+# ----------------------------------------------------------- the detectors
+
+
+def detector_height(array):
+    """The height (m) of a detector array: the median height of its detectors."""
+    return float(np.median(np.asarray(array.centers, dtype=float)[:, 2]))
+
+
+def _detector_planes(array):
+    """
+    The plane of each detector of an array, as (heights, normals, offsets):
+    heights (N,) of horizontal detectors, nan for others, and for every
+    detector its plane's normal (N, 3) and offset (N,), with normal · x =
+    offset on the plane. None for kinds of array other than
+    detector.HorizontalCircles and detector.Triangles.
+    """
+    if isinstance(array, _detector.HorizontalCircles):
+        heights = np.asarray(array.centers, dtype=float)[:, 2].copy()
+        normals = np.tile([0.0, 0.0, 1.0], (len(heights), 1))
+        return heights, normals, heights.copy()
+    if isinstance(array, _detector.Triangles):
+        edges = np.asarray(array.edges, dtype=float)
+        normals = np.cross(edges[:, 1] - edges[:, 0], edges[:, 2] - edges[:, 0])
+        flat = (normals[:, 0] == 0) & (normals[:, 1] == 0) & (normals[:, 2] != 0)
+        heights = np.where(flat, edges[:, 0, 2], np.nan)
+        offsets = np.einsum("nk,nk->n", normals, edges[:, 0])
+        return heights, normals, offsets
+    return None
+
+
+def _plane_distances(position, direction, heights, normals, offsets):
+    """
+    (M, N) distance along each line, from position along a unit direction,
+    to the plane of each detector; nan or infinite where they're parallel.
+    """
+    flat = np.isfinite(heights)
+    distance = np.empty((len(position), len(heights)))
+    # as to_ground works it out, so a flat array places particles just as the
+    # ground at its height does
+    distance[:, flat] = (position[:, None, 2] - heights[None, flat]) / -direction[
+        :, None, 2
+    ]
+    if (~flat).any():
+        normal = normals[~flat]
+        distance[:, ~flat] = (offsets[None, ~flat] - position @ normal.T) / (
+            direction @ normal.T
+        )
+    return distance
+
+
+def leaves_to_detectors(
+    pdg, position, momentum, kinetic_energy, time, array, chunk_size=2000
+):
+    """
+    Where and when leaves hit a detector of an array, given as for
+    leaves_to_ground: each is placed where its line meets the plane of the
+    first detector it reaches (of those it hits, as the detector sampler
+    finds them), at that detector's height. Leaves that hit no detector are
+    left out. For kinds of array whose planes aren't known here, leaves are
+    carried to the array's height instead (detector_height).
+
+    Returns pdg, position (M, 3), kinetic_energy, time of those that hit.
+    """
+    pdg = np.asarray(pdg).reshape(-1)
+    position = np.asarray(position, dtype=float).reshape(-1, 3)
+    momentum = np.asarray(momentum, dtype=float).reshape(-1, 3)
+    kinetic_energy = np.asarray(kinetic_energy, dtype=float).reshape(-1)
+    time = np.asarray(time, dtype=float).reshape(-1)
+    planes = _detector_planes(array)
+    if planes is None:
+        return leaves_to_ground(
+            pdg, position, momentum, kinetic_energy, time, detector_height(array)
+        )
+    heights, normals, offsets = planes
+    speed = speeds(pdg, kinetic_energy, momentum)
+    n_leaves = len(pdg)
+    hit = np.zeros(n_leaves, dtype=bool)
+    where = np.zeros((n_leaves, 3))
+    when = np.zeros(n_leaves)
+    for start in range(0, n_leaves, chunk_size):
+        part = slice(start, start + chunk_size)
+        p, m = position[part], momentum[part]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            direction = m / np.linalg.norm(m, axis=-1)[:, None]
+            hits = array.hit_any(p, m)
+            distance = _plane_distances(p, direction, heights, normals, offsets)
+            distance = np.where(
+                hits & np.isfinite(distance) & (distance >= 0), distance, np.inf
+            )
+            first = np.argmin(distance, axis=1)
+            length = distance[np.arange(len(p)), first]
+            reached = np.isfinite(length) & (speed[part] > 0)
+            length = np.where(reached, length, 0.0)
+            point = p + direction * length[:, None]
+            flat = np.isfinite(heights[first])
+            point[flat, 2] = heights[first][flat]
+            hit[part] = reached
+            where[part] = point
+            when[part] = time[part] + length / (speed[part] * SPEED_OF_LIGHT)
+    return pdg[hit], where[hit], kinetic_energy[hit], when[hit]
 
 
 def _empty_summary():
@@ -619,9 +737,10 @@ class GroundSummaries:
         * start_pdg, start_kinetic_energy, start_time, start_position and
           start_direction, as for responses.Responses.from_samples;
         * ground_pdg, ground_x, ground_y and ground_kinetic_energy, with a
-          value for each particle reaching the ground (at settings.height),
-          and ground_time if arrival times are known (in seconds, the
-          history's units);
+          value for each particle reaching the ground, and ground_time if
+          arrival times are known (in seconds, the history's units). They're
+          at settings.height, or at ground_z if the sample gives it, as for
+          particles where they hit detectors at different heights;
         * primary_position, primary_direction and primary_time, for
           distances and delays about the shower's axis; without them, those
           histograms are nan.
@@ -654,9 +773,12 @@ class GroundSummaries:
             }
             x = np.asarray(sample.ground_x, dtype=float).reshape(-1)
             y = np.asarray(sample.ground_y, dtype=float).reshape(-1)
+            z = getattr(sample, "ground_z", None)
+            if z is None:
+                z = np.full(len(x), settings.height)
             histograms = summarise(
                 sample.ground_pdg,
-                np.column_stack((x, y)),
+                np.column_stack((x, y, np.asarray(z, dtype=float).reshape(-1))),
                 sample.ground_kinetic_energy,
                 getattr(sample, "ground_time", None),
                 axes=cls._axes_of(values),
@@ -690,6 +812,7 @@ class GroundSummaries:
         progress=None,
         leaves=None,
         particles="all",
+        array=None,
     ):
         """
         Summaries of some of a sampling.DatasetSource's subshowers, picked
@@ -700,7 +823,8 @@ class GroundSummaries:
         By default every leaf of each subshower is summarised. Given leaves,
         a list with the history index labels of the leaves to summarise for
         each subshower, only those are, and particles says which they are
-        (see detected_in).
+        (see detected_in). Leaves are carried to the ground, or given a
+        detector array, to the detectors they hit (leaves_to_detectors).
         """
         settings = settings or GroundSettings()
         reader = source.reader
@@ -747,14 +871,18 @@ class GroundSummaries:
                 **primary,
             }
             used = positions_of(np.asarray(leaf_indices, dtype=np.int64))
-            pdg, ground_position, kinetic_energy, ground_time = leaves_to_ground(
+            leaf_values = (
                 columns["pdg"][used],
                 np.stack([columns[c][used] for c in "xyz"], axis=-1),
                 np.stack([columns[c][used] for c in ["px", "py", "pz"]], axis=-1),
                 columns["kinetic_energy"][used],
                 columns["time"][used],
-                settings.height,
             )
+            if array is None:
+                placed = leaves_to_ground(*leaf_values, settings.height)
+            else:
+                placed = leaves_to_detectors(*leaf_values, array)
+            pdg, ground_position, kinetic_energy, ground_time = placed
             histograms = summarise(
                 pdg,
                 ground_position,
@@ -768,17 +896,23 @@ class GroundSummaries:
 
     @classmethod
     def detected_in(
-        cls, source, responses, settings=None, metadata=None, progress=None
+        cls, source, responses, settings=None, metadata=None, progress=None, array=None
     ):
         """
         Summaries of the particles that hit some detector, of the subshowers
         of a responses.Responses measured from a sampling.DatasetSource, in
-        the same order. They're summarised as the ground summaries are, so a
-        detected particle is placed where its line meets the ground: where
-        it meets the detector if the detectors are on the ground.
+        the same order, counted as the ground summaries are. Given the array
+        the responses were measured with, each particle is placed where it
+        hits its detector, at that detector's height (leaves_to_detectors);
+        without it, where its line meets the ground.
         """
         if not responses.keeps_detected_leaves:
             raise ValueError("the responses don't record which leaves hit a detector")
+        if array is not None and len(array) != responses.n_detectors:
+            raise ValueError(
+                f"the responses were measured with {responses.n_detectors}"
+                f" detectors, not {len(array)}"
+            )
         names = set(responses.values["source"].tolist())
         if names - {source.name}:
             raise ValueError(
@@ -792,6 +926,7 @@ class GroundSummaries:
             progress,
             leaves=[responses.detected_leaf_indices(i) for i in range(len(responses))],
             particles="detected",
+            array=array,
         )
 
     @classmethod

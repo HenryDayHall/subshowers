@@ -234,15 +234,37 @@ def describe_energy(gev):
     return f"{gev:g} GeV"
 
 
-def describe_ground(settings, frame):
+def height_given(config):
+    """Whether the config's ground section gives the ground's height."""
+    section = config.get("ground") if isinstance(config, dict) else None
+    return isinstance(section, dict) and section.get("height") is not None
+
+
+def describe_height(settings, array, given):
+    """The ground's height, and where it came from."""
+    if given:
+        where = "as the config sets it"
+    else:
+        heights = np.asarray(array.centers, dtype=float)[:, 2]
+        if heights.min() == heights.max():
+            where = "the detectors' height"
+        else:
+            where = (
+                f"the detectors' median height (they're from {heights.min():.6g}"
+                f" to {heights.max():.6g} m)"
+            )
+    return f"z = {settings.height:.6g} m, {where}"
+
+
+def describe_ground(settings, frame, array, given):
     minimum = ", ".join(
         f"{ground.SPECIES_LABELS[name]} {describe_energy(energy)}"
         for name, energy in settings.min_kinetic_energy.items()
     )
     return (
-        f"z = {settings.height:g} m, counting particles above {minimum};"
-        f" readings at {settings.reference_distance[frame]:g} m from the"
-        f" {frame} axis"
+        f"{describe_height(settings, array, given)}; counting particles above"
+        f" {minimum}; readings at {settings.reference_distance[frame]:g} m from"
+        f" the {frame} axis"
     )
 
 
@@ -285,7 +307,9 @@ def ground_settings_for(settings, ground_settings, particles="all"):
     """
     What decides a set's ground summaries: what picks its subshowers (the
     responses' settings, but for the detector unless the summaries are of
-    the detected particles) and the ground settings.
+    the detected particles) and the ground settings. Detected particles are
+    placed where they hit their detectors, which summaries saved before
+    weren't, so their settings say so.
     """
     chosen = {
         key: value
@@ -293,6 +317,8 @@ def ground_settings_for(settings, ground_settings, particles="all"):
         if key != "detector" or particles == "detected"
     }
     chosen["ground"] = ground_settings.as_dict()
+    if particles == "detected":
+        chosen["placed"] = "where each hits a detector"
     return json.loads(json.dumps(chosen, default=str))
 
 
@@ -367,7 +393,15 @@ def measure(check, array, settings, path, args, reuse):
 
 
 def summarise_ground(
-    check, responses, settings, ground_settings, path, reuse, source, particles="all"
+    check,
+    responses,
+    settings,
+    ground_settings,
+    path,
+    reuse,
+    source,
+    particles="all",
+    array=None,
 ):
     """
     What the subshowers of responses put on the ground, as GroundSummaries
@@ -375,7 +409,8 @@ def summarise_ground(
     set's DatasetSource if it's open: read from path if they were saved with
     the same settings, otherwise worked out (opening the source if it isn't
     open) and saved there. With particles="detected", only of the particles
-    that hit a detector, as the responses record them.
+    that hit a detector, as the responses record them, placed where they hit
+    the detectors of array, the array the responses were measured with.
     """
     if reuse:
         saved = saved_with(path, settings, GroundSummaries)
@@ -400,7 +435,9 @@ def summarise_ground(
         ),
     )
     if particles == "detected":
-        summaries = GroundSummaries.detected_in(source, responses, **options)
+        summaries = GroundSummaries.detected_in(
+            source, responses, array=array, **options
+        )
     else:
         numbers = responses.values["subshower_number"]
         summaries = GroundSummaries.from_source(source, numbers, **options)
@@ -580,7 +617,8 @@ def main():
     report = Report()
     try:
         array = detector.from_config(config)
-        ground_settings = GroundSettings.from_config(config)
+        # the ground is at the detectors' height, unless the config says otherwise
+        ground_settings = GroundSettings.from_config(config, array)
         showers_folder = generation.showers_folder(config)
         queued = generation.queued_outputs(showers_folder) or {}
         checks = datasets.check_subshower_sets(config, queued)
@@ -605,7 +643,10 @@ def main():
     unseeded = detector.is_unseeded(config)
     report(f"Config: {os.path.abspath(args.config_file)}")
     report(f"Detector: {describe_detector(config, array)}")
-    report(f"Ground: {describe_ground(ground_settings, args.frame)}")
+    report(
+        "Ground: "
+        + describe_ground(ground_settings, args.frame, array, height_given(config))
+    )
     report(f"Output: {output_dir}")
     if unseeded:
         report(
@@ -681,6 +722,7 @@ def main():
                         and (kind == "all" or responses_reused),
                         source=source,
                         particles=kind,
+                        array=array,
                     )
                     n_there = int(summaries[kind].reaches_ground.sum())
                     report(

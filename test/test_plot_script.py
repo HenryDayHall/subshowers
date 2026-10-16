@@ -94,7 +94,10 @@ def test_plots_what_exists(script, config_path, tmp_path, monkeypatch):
     assert "e1e6_0, energy cut 500 GeV: not made yet" in report
     assert "e1e7_0, energy cut 100 GeV: the shower isn't made" in report
     assert "e1e7_0, energy cut 500 GeV: the shower isn't made" in report
-    assert "Ground: z = 0 m, counting particles above e± 0.5 MeV" in report
+    assert (
+        "Ground: z = 0 m, the detectors' height; counting particles above e± 0.5 MeV"
+        in report
+    )
     assert "readings at 100 m from the subshower axis" in report
     assert report.count("put particles on the ground; worked out in") == 3
     assert report.count("put particles on a detector; worked out in") == 3
@@ -201,9 +204,21 @@ def test_saved_responses_reused(script, config_path, tmp_path, monkeypatch, caps
     config_path.write_text(yaml.safe_dump(config))
     run(script, monkeypatch, *arguments)
     printed = capsys.readouterr().out
+    assert "Ground: z = 100 m, as the config sets it" in printed
     assert printed.count("saved earlier") == 3
     assert printed.count("ground; worked out in") == 3
     assert printed.count("detector; worked out in") == 3
+
+    # detected particles saved before they were placed on their detectors
+    # are worked out again
+    path = output / "ground_detected" / "e1e5_0_e100.npz"
+    old = GroundSummaries.load(str(path))
+    del old.metadata["settings"]["placed"]
+    old.save(str(path))
+    run(script, monkeypatch, *arguments)
+    printed = capsys.readouterr().out
+    assert printed.count("detector; worked out in") == 1
+    assert printed.count("detector; as worked out before") == 2
 
     # responses saved before they recorded which leaves hit a detector are
     # measured again

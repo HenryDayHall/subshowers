@@ -56,8 +56,11 @@ ground:
 
   # Height of the ground, in the history's coordinates (m), where z = 0 is
   # CORSIKA's observation level. Leaves are carried down to it in straight
-  # lines.
-  height: 0.0
+  # lines. Left out, it's the height of the detectors above (the median, if
+  # they're at different heights), so what reaches the ground is what
+  # reaches the detectors' level. Particles that hit a detector are always
+  # placed where they hit it, at that detector's height.
+  # height: 0.0
 
   # Particles below these kinetic energies (GeV) aren't counted. CORSIKA 8
   # writes particles to the history before cutting them, and these are the

@@ -371,20 +371,27 @@ counted, and the reference distance in each frame. Left out, it's
 
 ```yaml
 ground:
-  height: 0.0
+  # height: the detectors' height
   min_kinetic_energy: {electrons: 5.0e-4, photons: 5.0e-4, muons: 0.3, hadrons: 0.3}
   reference_distance: {subshower: 100.0, shower: 800.0}
 ```
 
+Without a `height`, the ground is at the height of the detectors the
+`detectors` section describes: 0 for `generate_at_ground`, and the median
+station altitude for arrays read from a csv, such as
+`generate_pierre_auger`'s (whose stations range from 1344 to 1619 m). The
+report says which height it used, and why.
+
 A particle hits a detector if its straight line from where it was made
 crosses one, as for the detector responses, which record which leaves did.
-For the detected figures it's placed, like every particle, where its line
-meets the ground: where it meets the detector if the detectors lie on the
-ground, as `generate_at_ground` puts them. For an array above it, set the
-ground's `height` to the detectors'. Deposits count every leaf that hits a
-detector, but the detected figures leave out those below the tracking cuts,
-and neutrinos, so a few subshowers that deposit energy may put no counted
-particle on a detector.
+For the detected figures it's placed where its line meets the first
+detector it hits, at that detector's own height; for detectors on one
+level, as `generate_at_ground` makes them, that's just where it reaches the
+ground. On uneven ground, where the ground is a plane at the detectors'
+median height, a particle can hit a low detector without reaching that
+plane. Deposits count every leaf that hits a detector, but the detected
+figures leave out those below the tracking cuts, and neutrinos, so a few
+subshowers that deposit energy may put no counted particle on a detector.
 
 Each subshower is summarised by histograms with fixed bins, for both frames,
 so `--frame` only changes the plots. Each set's summaries are saved in
@@ -401,7 +408,8 @@ model gives them, `ground_time` (in seconds). With `primary_position`,
 `primary_direction` and `primary_time`, the shower's axis can be used too.
 For a model that only makes the particles that reach detectors, say so with
 `particles="detected"`, and compare it with the dataset's detected
-particles:
+particles. Particles are put at the ground's height, or give `ground_z` with
+each particle's height, e.g. that of the detector it hit:
 
 ```python
 from subshowers import ground_observables
