@@ -31,6 +31,11 @@ generative model's output, can be compared. GroundSummaries holds them for
 many subshowers. Positions are in metres, as in the history, with the ground
 at z = height (0 is CORSIKA's observation level); times in the history are
 in seconds, and delays here are in nanoseconds.
+
+The same summaries can be made of only the leaves that hit some detector,
+as responses.Responses records them (GroundSummaries.detected_in): the part
+of each summary that a detector array observes, which is what a generative
+model that only makes particles reaching detectors should reproduce.
 """
 
 import json
@@ -54,6 +59,10 @@ NEUTRINOS = (12, 14, 16)
 
 # the frames distances and delays are measured in, as above
 FRAMES = ["subshower", "shower"]
+
+# which of a subshower's particles on the ground are summarised: all of them,
+# or only those that hit some detector on the way (see GroundSummaries)
+PARTICLES = ["all", "detected"]
 
 # kinetic energy (GeV) below which a particle isn't counted: the defaults of
 # c8_air_shower_with_history's --emcut, --mucut and --hadcut
@@ -492,6 +501,13 @@ class GroundSummaries:
     gives. Like responses.Responses, but for the ground rather than a
     detector array, so it can be made from the dataset (from_source) or from
     a generative model's subshowers (from_samples), and compared.
+
+    particles says which of the subshowers' particles are summarised: "all"
+    that reach the ground, or only those "detected", i.e. that hit some
+    detector on the way (detected_in). The detected ones are summarised just
+    as the others are, so their histograms are the part of the others that
+    the array observes, and can be compared with a generative model's that
+    only makes particles which reach detectors.
     """
 
     # one value per subshower, and its type
@@ -512,7 +528,9 @@ class GroundSummaries:
     ]
     FORMAT_VERSION = 1
 
-    def __init__(self, values, histograms, settings=None, metadata=None):
+    def __init__(
+        self, values, histograms, settings=None, metadata=None, particles="all"
+    ):
         """
         Parameters
         ----------
@@ -526,7 +544,12 @@ class GroundSummaries:
             The settings they were made with.
         metadata : dict
             Anything that can be written as json.
+        particles : str
+            Which particles are summarised, one of PARTICLES.
         """
+        if particles not in PARTICLES:
+            raise ValueError(f"particles must be one of {PARTICLES}, not {particles!r}")
+        self.particles = particles
         shapes = _histogram_shapes()
         n_subshowers = len(np.asarray(histograms["number"]))
         self.histograms = {}
@@ -551,7 +574,10 @@ class GroundSummaries:
 
     @property
     def reaches_ground(self):
-        """True for subshowers that put some counted particle on the ground."""
+        """
+        True for subshowers that put some counted particle on the ground, or
+        for detected particles, on a detector.
+        """
         return self.histograms["number"].sum(axis=1) > 0
 
     def axes(self, frame):
@@ -562,7 +588,7 @@ class GroundSummaries:
     # ----------------------------------------------------------- building
 
     @classmethod
-    def _build(cls, rows, settings, metadata):
+    def _build(cls, rows, settings, metadata, particles):
         """From a list of (values, histograms) for each subshower."""
         names = list(cls.scalar_columns) + cls.vector_columns
         values = {name: [row[0][name] for row in rows] for name in names}
@@ -577,13 +603,18 @@ class GroundSummaries:
                 name: np.zeros((0, 3)) if name in cls.vector_columns else []
                 for name in names
             }
-        return cls(values, histograms, settings, metadata)
+        return cls(values, histograms, settings, metadata, particles)
 
     @classmethod
-    def from_samples(cls, samples, settings=None, source=None, metadata=None):
+    def from_samples(
+        cls, samples, settings=None, source=None, metadata=None, particles="all"
+    ):
         """
         Summaries of subshowers given as particles on the ground, such as a
-        generative model makes. Each sample needs
+        generative model makes. particles is "detected" if they're only the
+        particles that hit a detector, as from a model that only makes
+        those, or "all" if they're all that reach the ground. Each sample
+        needs
 
         * start_pdg, start_kinetic_energy, start_time, start_position and
           start_direction, as for responses.Responses.from_samples;
@@ -632,7 +663,7 @@ class GroundSummaries:
                 settings=settings,
             )
             rows.append((values, histograms))
-        return cls._build(rows, settings, metadata)
+        return cls._build(rows, settings, metadata, particles)
 
     @staticmethod
     def _axes_of(values):
@@ -651,13 +682,25 @@ class GroundSummaries:
 
     @classmethod
     def from_source(
-        cls, source, subshower_numbers, settings=None, metadata=None, progress=None
+        cls,
+        source,
+        subshower_numbers,
+        settings=None,
+        metadata=None,
+        progress=None,
+        leaves=None,
+        particles="all",
     ):
         """
         Summaries of some of a sampling.DatasetSource's subshowers, picked
         by their number within it (as Responses.values["subshower_number"]
         records them), in that order. progress, if given, wraps the numbers
         as they're used, e.g. to print how far it has got.
+
+        By default every leaf of each subshower is summarised. Given leaves,
+        a list with the history index labels of the leaves to summarise for
+        each subshower, only those are, and particles says which they are
+        (see detected_in).
         """
         settings = settings or GroundSettings()
         reader = source.reader
@@ -678,9 +721,18 @@ class GroundSummaries:
                 ),
             }
         numbers = np.asarray(subshower_numbers, dtype=np.int64).reshape(-1)
+        if leaves is not None:
+            leaves = list(leaves)
+            if len(leaves) != len(numbers):
+                raise ValueError(
+                    f"leaves for {len(leaves)} subshowers, not {len(numbers)}"
+                )
         rows = []
-        for number in progress(numbers) if progress is not None else numbers:
+        chosen = progress(numbers) if progress is not None else numbers
+        for k, number in enumerate(chosen):
             start_index, leaf_indices = source[int(number)]
+            if leaves is not None:
+                leaf_indices = leaves[k]
             start = int(np.atleast_1d(positions_of(start_index))[0])
             values = {
                 "source": source.name,
@@ -694,13 +746,13 @@ class GroundSummaries:
                 ),
                 **primary,
             }
-            leaves = positions_of(np.asarray(leaf_indices))
+            used = positions_of(np.asarray(leaf_indices, dtype=np.int64))
             pdg, ground_position, kinetic_energy, ground_time = leaves_to_ground(
-                columns["pdg"][leaves],
-                np.stack([columns[c][leaves] for c in "xyz"], axis=-1),
-                np.stack([columns[c][leaves] for c in ["px", "py", "pz"]], axis=-1),
-                columns["kinetic_energy"][leaves],
-                columns["time"][leaves],
+                columns["pdg"][used],
+                np.stack([columns[c][used] for c in "xyz"], axis=-1),
+                np.stack([columns[c][used] for c in ["px", "py", "pz"]], axis=-1),
+                columns["kinetic_energy"][used],
+                columns["time"][used],
                 settings.height,
             )
             histograms = summarise(
@@ -712,17 +764,51 @@ class GroundSummaries:
                 settings=settings,
             )
             rows.append((values, histograms))
-        return cls._build(rows, settings, metadata)
+        return cls._build(rows, settings, metadata, particles)
+
+    @classmethod
+    def detected_in(
+        cls, source, responses, settings=None, metadata=None, progress=None
+    ):
+        """
+        Summaries of the particles that hit some detector, of the subshowers
+        of a responses.Responses measured from a sampling.DatasetSource, in
+        the same order. They're summarised as the ground summaries are, so a
+        detected particle is placed where its line meets the ground: where
+        it meets the detector if the detectors are on the ground.
+        """
+        if not responses.keeps_detected_leaves:
+            raise ValueError("the responses don't record which leaves hit a detector")
+        names = set(responses.values["source"].tolist())
+        if names - {source.name}:
+            raise ValueError(
+                f"the responses are of {sorted(names)}, not just {source.name!r}"
+            )
+        return cls.from_source(
+            source,
+            responses.values["subshower_number"],
+            settings,
+            metadata,
+            progress,
+            leaves=[responses.detected_leaf_indices(i) for i in range(len(responses))],
+            particles="detected",
+        )
 
     @classmethod
     def concatenate(cls, parts, metadata=None):
-        """All the subshowers of several GroundSummaries made with one setting."""
+        """
+        All the subshowers of several GroundSummaries, made with one setting
+        and of the same particles.
+        """
         parts = list(parts)
         if not parts:
             raise ValueError("nothing to concatenate")
         settings = parts[0].settings
         if any(part.settings.as_dict() != settings.as_dict() for part in parts):
             raise ValueError("the parts were made with different ground settings")
+        particles = parts[0].particles
+        if any(part.particles != particles for part in parts):
+            raise ValueError("the parts summarise different particles")
         return cls(
             {
                 name: np.concatenate([part.values[name] for part in parts])
@@ -734,6 +820,7 @@ class GroundSummaries:
             },
             settings,
             metadata,
+            particles,
         )
 
     def select(self, which):
@@ -744,6 +831,7 @@ class GroundSummaries:
             {name: array[indices] for name, array in self.histograms.items()},
             self.settings,
             self.metadata,
+            self.particles,
         )
 
     # ------------------------------------------------------- saving, loading
@@ -754,6 +842,7 @@ class GroundSummaries:
             "format_version": np.array(self.FORMAT_VERSION),
             "settings": np.array(json.dumps(self.settings.as_dict())),
             "metadata": np.array(json.dumps(self.metadata)),
+            "particles": np.array(self.particles),
             "species": np.array(json.dumps(SPECIES)),
             "frames": np.array(json.dumps(FRAMES)),
             "radius_edges": RADIUS_EDGES,
@@ -787,11 +876,14 @@ class GroundSummaries:
             if not same_bins:
                 raise ValueError(f"{path} was made with other bins or species")
             names = list(cls.scalar_columns) + cls.vector_columns
+            # files from before detected particles were summarised are of all
+            particles = str(data["particles"]) if "particles" in data else "all"
             return cls(
                 {name: data[f"value_{name}"] for name in names},
                 {name: data[f"histogram_{name}"] for name in HISTOGRAMS},
                 GroundSettings(**json.loads(data["settings"].item())),
                 json.loads(data["metadata"].item()),
+                particles,
             )
 
     @classmethod

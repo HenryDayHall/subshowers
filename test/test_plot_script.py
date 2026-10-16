@@ -97,6 +97,7 @@ def test_plots_what_exists(script, config_path, tmp_path, monkeypatch):
     assert "Ground: z = 0 m, counting particles above e± 0.5 MeV" in report
     assert "readings at 100 m from the subshower axis" in report
     assert report.count("put particles on the ground; worked out in") == 3
+    assert report.count("put particles on a detector; worked out in") == 3
     for name in [
         "e100/A_by_primary.png",
         "e100/A_by_pdg.png",
@@ -110,11 +111,21 @@ def test_plots_what_exists(script, config_path, tmp_path, monkeypatch):
         "e500/ground_lateral_subshower_axis_by_primary.png",
         "all_cuts/ground_lateral_subshower_axis_by_cut.png",
         "all_cuts/ground_numbers_by_cut.png",
+        "e100/ground_detected_lateral_subshower_axis_by_pdg.png",
+        "e500/ground_detected_numbers_by_primary.png",
+        "all_cuts/ground_detected_lateral_subshower_axis_by_cut.png",
     ]:
         assert (output / name).is_file(), name
     saved = sorted(path.name for path in (output / "responses").iterdir())
     assert saved == ["e1e5_0_e100.npz", "e1e5_0_e500.npz", "e1e6_0_e100.npz"]
-    assert sorted(path.name for path in (output / "ground").iterdir()) == saved
+    for folder in ["ground", "ground_detected"]:
+        assert sorted(path.name for path in (output / folder).iterdir()) == saved
+    for name in saved:
+        responses = Responses.load(str(output / "responses" / name))
+        detected = GroundSummaries.load(str(output / "ground_detected" / name))
+        assert responses.keeps_detected_leaves
+        assert detected.particles == "detected"
+        assert len(detected) == len(responses)
 
 
 def test_shower_frame(script, config_path, tmp_path, monkeypatch):
@@ -130,17 +141,18 @@ def test_shower_frame(script, config_path, tmp_path, monkeypatch):
     report = (output / "report.txt").read_text()
     assert "readings at 1000 m from the shower axis" in report
     written = sorted(path.name for path in (output / "e500").iterdir())
-    assert written == [
-        f"{name}_{suffix}.png"
+    assert written == sorted(
+        f"{start}_{name}_{suffix}.png"
+        for start in ["ground", "ground_detected"]
         for name in [
-            "ground_lateral_shower_axis",
-            "ground_numbers",
-            "ground_reference_shower_axis",
-            "ground_spectra",
-            "ground_timing_shower_axis",
+            "lateral_shower_axis",
+            "numbers",
+            "reference_shower_axis",
+            "spectra",
+            "timing_shower_axis",
         ]
         for suffix in ["by_pdg", "by_primary", "by_primary_electrons_and_positrons"]
-    ]
+    )
 
 
 def test_saved_responses_reused(script, config_path, tmp_path, monkeypatch, capsys):
@@ -154,23 +166,27 @@ def test_saved_responses_reused(script, config_path, tmp_path, monkeypatch, caps
     printed = capsys.readouterr().out
     assert printed.count("measured in") == 3
     assert printed.count("ground; worked out in") == 3
+    assert printed.count("detector; worked out in") == 3
     for path in (output / "responses").iterdir():
         assert len(Responses.load(str(path))) == 5
-    for path in (output / "ground").iterdir():
-        assert len(GroundSummaries.load(str(path))) == 5
+    for folder in ["ground", "ground_detected"]:
+        for path in (output / folder).iterdir():
+            assert len(GroundSummaries.load(str(path))) == 5
 
     run(script, monkeypatch, *arguments)
     printed = capsys.readouterr().out
     assert printed.count("saved earlier") == 3
     assert printed.count("ground; as worked out before") == 3
+    assert printed.count("detector; as worked out before") == 3
 
     run(script, monkeypatch, *arguments, "--recompute")
     printed = capsys.readouterr().out
     assert printed.count("measured in") == 3
     assert printed.count("ground; worked out in") == 3
+    assert printed.count("detector; worked out in") == 3
 
-    # another array means measuring again, but the same subshowers are on
-    # the ground
+    # another array means measuring again, and working out what reaches
+    # the detectors, but the same subshowers are on the ground
     config = yaml.safe_load(config_path.read_text())
     config["detectors"]["generator"]["seed"] = 1
     config_path.write_text(yaml.safe_dump(config))
@@ -178,14 +194,34 @@ def test_saved_responses_reused(script, config_path, tmp_path, monkeypatch, caps
     printed = capsys.readouterr().out
     assert printed.count("measured in") == 3
     assert printed.count("ground; as worked out before") == 3
+    assert printed.count("detector; worked out in") == 3
 
-    # another ground means working out what's on it again
+    # another ground means working out what's on it, and on the detectors
     config["ground"] = {"height": 100.0}
     config_path.write_text(yaml.safe_dump(config))
     run(script, monkeypatch, *arguments)
     printed = capsys.readouterr().out
     assert printed.count("saved earlier") == 3
     assert printed.count("ground; worked out in") == 3
+    assert printed.count("detector; worked out in") == 3
+
+    # responses saved before they recorded which leaves hit a detector are
+    # measured again
+    path = output / "responses" / "e1e5_0_e100.npz"
+    old = Responses.load(str(path))
+    Responses(
+        old.n_detectors,
+        old.values,
+        old.hit_offsets,
+        old.hit_detectors,
+        old.hit_energies,
+        old.metadata,
+    ).save(str(path))
+    run(script, monkeypatch, *arguments)
+    printed = capsys.readouterr().out
+    assert printed.count("saved earlier") == 2
+    assert printed.count("didn't record which leaves hit a detector") == 1
+    assert Responses.load(str(path)).keeps_detected_leaves
 
     # a random array without a seed is measured again every time
     del config["detectors"]["generator"]["seed"]
@@ -224,7 +260,10 @@ def test_bad_detector(script, config_path, monkeypatch):
     assert "total" in str(stopped.value.code)
 
 
-def test_ground_failure_keeps_other_plots(script, config_path, tmp_path, monkeypatch):
+@pytest.mark.parametrize("broken", [["all", "detected"], ["detected"]])
+def test_ground_failure_keeps_other_plots(
+    script, config_path, tmp_path, monkeypatch, broken
+):
     monkeypatch.setattr(script, "FIGURES", [script.FIGURES[-1]])
     monkeypatch.setattr(script, "GROUND_FIGURES", [script.GROUND_FIGURES[1]])
     monkeypatch.setattr(script, "plot_examples", lambda *args: None)
@@ -232,7 +271,10 @@ def test_ground_failure_keeps_other_plots(script, config_path, tmp_path, monkeyp
     summarise_ground = script.summarise_ground
 
     def failing(check, *args, **kwargs):
-        if check.subshower_set.shower.subfolder == "e1e6_0":
+        if (
+            check.subshower_set.shower.subfolder == "e1e6_0"
+            and kwargs["particles"] in broken
+        ):
             raise RuntimeError("broken")
         return summarise_ground(check, *args, **kwargs)
 
@@ -241,17 +283,21 @@ def test_ground_failure_keeps_other_plots(script, config_path, tmp_path, monkeyp
     run(script, monkeypatch, config_path, "--output-dir", output)
     report = (output / "report.txt").read_text()
     assert "couldn't be worked out, RuntimeError: broken" in report
-    assert report.count("without what reaches the ground") == 1
+    assert report.count("without what reaches a detector") == 1
+    assert report.count("without what reaches the ground") == len(broken) - 1
     # e1e6_0 has only the 100 GeV cut, so the 500 GeV cut keeps its ground
-    assert sorted(path.name for path in (output / "e100").iterdir()) == [
-        "distributions_by_pdg.png",
-        "distributions_by_primary.png",
-        "distributions_by_primary_electrons_and_positrons.png",
-    ]
+    kept = [] if "all" in broken else ["ground_spectra"]
+    expected = sorted(
+        f"{name}_{suffix}.png"
+        for name in ["distributions"] + kept
+        for suffix in ["by_pdg", "by_primary", "by_primary_electrons_and_positrons"]
+    )
+    assert sorted(path.name for path in (output / "e100").iterdir()) == expected
     assert (output / "e500" / "ground_spectra_by_pdg.png").is_file()
-    assert sorted(path.name for path in (output / "all_cuts").iterdir()) == [
-        "distributions_by_cut.png"
-    ]
+    assert (output / "e500" / "ground_detected_spectra_by_pdg.png").is_file()
+    assert sorted(path.name for path in (output / "all_cuts").iterdir()) == sorted(
+        ["distributions_by_cut.png"] + [f"{name}_by_cut.png" for name in kept]
+    )
 
 
 def test_bad_ground(script, config_path, monkeypatch):

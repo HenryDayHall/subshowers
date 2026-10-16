@@ -389,6 +389,107 @@ def test_from_source(dataset):
         ground.check_aligned(summaries.select(slice(1, None)), responses)
 
 
+@pytest.fixture(scope="module")
+def landing(tmp_path_factory):
+    """A shower starting low enough that much of it lands on the array."""
+    folder = str(tmp_path_factory.mktemp("low") / "e1e5_0")
+    fake_history(
+        folder,
+        grow_cascade(np.random.default_rng(3), 3.0e3, 12_000.0, min_height=1.0),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        subshowers.run(folder, 100.0, leaves_only=True)
+    array = detector.generate_at_ground(400, 3000.0, 150.0, 20.0, seed=0)
+    source = DatasetSource(
+        folder, output_path=os.path.join(folder, "subshowers_e100.0.h5"), name="e1e5_0"
+    )
+    samples = list(SubshowerSampler([source], array, seed=1).iter_epoch())
+    return source, samples, Responses.from_samples(samples, len(array))
+
+
+def test_detected_in(landing):
+    source, samples, responses = landing
+    detected = GroundSummaries.detected_in(source, responses)
+    everything = GroundSummaries.from_source(
+        source, responses.values["subshower_number"]
+    )
+    assert detected.particles == "detected" and everything.particles == "all"
+    ground.check_aligned(detected, responses)
+    for name in detected.values:
+        np.testing.assert_array_equal(detected.values[name], everything.values[name])
+    # a good share of subshowers put something on a detector, but not all
+    on_detector = detected.reaches_ground
+    assert 5 < on_detector.sum() < len(detected)
+    # what reaches a detector is part of what reaches the ground
+    for name in ["number", "spectrum", "lateral", "at_reference"]:
+        assert np.all(
+            np.nan_to_num(detected.histograms[name])
+            <= np.nan_to_num(everything.histograms[name])
+        ), name
+    assert detected.histograms["number"].sum() < everything.histograms["number"].sum()
+
+    # each subshower's detected leaves, carried down by hand
+    data = source.reader.data
+    for i in np.flatnonzero(on_detector)[:3]:
+        rows = data.loc[samples[i].detected_leaf_indices]
+        values = {name: column[i] for name, column in detected.values.items()}
+        expected = ground.summarise(
+            *ground.leaves_to_ground(
+                rows["pdg"].to_numpy(),
+                rows[["x", "y", "z"]].to_numpy(),
+                rows[["px", "py", "pz"]].to_numpy(),
+                rows["kinetic_energy"].to_numpy(),
+                rows["time"].to_numpy(),
+            ),
+            axes=GroundSummaries._axes_of(values),
+        )
+        for name in ground.HISTOGRAMS:
+            np.testing.assert_allclose(
+                detected.histograms[name][i], expected[name], equal_nan=True
+            )
+
+    # summaries of detected particles aren't mixed with those of all
+    with pytest.raises(ValueError, match="different particles"):
+        GroundSummaries.concatenate([detected, everything])
+    assert GroundSummaries.concatenate([detected, detected]).particles == "detected"
+    assert detected.select([0, 1]).particles == "detected"
+
+
+def test_detected_in_needs_detected_leaves(landing):
+    source, samples, responses = landing
+    stripped = []
+    for sample in samples[:3]:
+        fields = vars(sample).copy()
+        del fields["detected_leaf_indices"]
+        stripped.append(SimpleNamespace(**fields))
+    without = Responses.from_samples(stripped, responses.n_detectors)
+    with pytest.raises(ValueError, match="don't record"):
+        GroundSummaries.detected_in(source, without)
+    elsewhere = Responses.from_samples(
+        samples[:3], responses.n_detectors, source="another shower"
+    )
+    with pytest.raises(ValueError, match="another shower"):
+        GroundSummaries.detected_in(source, elsewhere)
+
+
+def test_particles_saved(tmp_path):
+    rng = np.random.default_rng(6)
+    model = GroundSummaries.from_samples(
+        [ground_sample(rng) for _ in range(2)], particles="detected"
+    )
+    path = str(tmp_path / "model.npz")
+    model.save(path)
+    assert GroundSummaries.load(path).particles == "detected"
+    with pytest.raises(ValueError, match="particles"):
+        GroundSummaries.from_samples([ground_sample(rng)], particles="some")
+    # files from before particles were saved are of all of them
+    with np.load(path) as data:
+        arrays = {key: data[key] for key in data.files if key != "particles"}
+    np.savez_compressed(path, **arrays)
+    assert GroundSummaries.load(path).particles == "all"
+
+
 # ------------------------------------------------------------- detectors
 
 
