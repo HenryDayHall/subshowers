@@ -342,6 +342,15 @@ each grouping, the plotting script draws
 Lines are means over a group's subshowers, with a band of the standard error
 of the mean; arrival times are averaged over the particles instead.
 
+Each figure is drawn twice: of every particle reaching the ground, in
+`ground_*`, and of only the particles that hit a detector, in
+`ground_detected_*` (e.g. `ground_detected_lateral_subshower_axis_by_pdg.png`).
+The detected particles are counted the same way, in the same bins and per
+m² of the same area (of the shower plane, not of the detectors), so each
+detected curve is the part of the full one that the array observes. These
+are the metrics to compare a generative model against when the model only
+makes particles that reach detectors.
+
 The particles a subshower puts on the ground are its leaves, carried down in
 straight lines as the detector sampler carries them, and slowed by their
 mass. CORSIKA 8 writes particles to the history before deciding whether to
@@ -362,40 +371,76 @@ counted, and the reference distance in each frame. Left out, it's
 
 ```yaml
 ground:
-  height: 0.0
+  # height: the detectors' height
   min_kinetic_energy: {electrons: 5.0e-4, photons: 5.0e-4, muons: 0.3, hadrons: 0.3}
   reference_distance: {subshower: 100.0, shower: 800.0}
 ```
 
+Without a `height`, the ground is at the height of the detectors the
+`detectors` section describes: 0 for `generate_at_ground`, and the median
+station altitude for arrays read from a csv, such as
+`generate_pierre_auger`'s (whose stations range from 1344 to 1619 m). The
+report says which height it used, and why.
+
+A particle hits a detector if its straight line from where it was made
+crosses one, as for the detector responses, which record which leaves did.
+For the detected figures it's placed where its line meets the first
+detector it hits, at that detector's own height; for detectors on one
+level, as `generate_at_ground` makes them, that's just where it reaches the
+ground. On uneven ground, where the ground is a plane at the detectors'
+median height, a particle can hit a low detector without reaching that
+plane. Deposits count every leaf that hits a detector, but the detected
+figures leave out those below the tracking cuts, and neutrinos, so a few
+subshowers that deposit energy may put no counted particle on a detector.
+
 Each subshower is summarised by histograms with fixed bins, for both frames,
 so `--frame` only changes the plots. Each set's summaries are saved in
 `ground/` in the output folder, and used again while the set, the sampling
-options and the `ground` section stay the same.
+options and the `ground` section stay the same. Those of the detected
+particles are saved in `ground_detected/`, and are worked out again whenever
+the responses are measured again, too. Responses saved before they recorded
+which leaves hit a detector are measured again.
 
 A generative model's subshowers are compared in the same way. Give each the
 start values, as for responses, and the particles it puts on the ground:
 `ground_pdg`, `ground_x`, `ground_y`, `ground_kinetic_energy` and, if the
 model gives them, `ground_time` (in seconds). With `primary_position`,
 `primary_direction` and `primary_time`, the shower's axis can be used too.
+For a model that only makes the particles that reach detectors, say so with
+`particles="detected"`, and compare it with the dataset's detected
+particles. Particles are put at the ground's height, or give `ground_z` with
+each particle's height, e.g. that of the detector it hit:
 
 ```python
 from subshowers import ground_observables
 from subshowers.ground import GroundSummaries
 
+# saved_paths: the dataset's files in ground_detected/
 dataset = GroundSummaries.concatenate(GroundSummaries.load(path) for path in saved_paths)
-model = GroundSummaries.from_samples(model_samples, dataset.settings, source="model")
+model = GroundSummaries.from_samples(
+    model_samples, dataset.settings, source="model", particles="detected"
+)
 by_group = {
     "dataset": ground_observables.record_of(dataset, "subshower"),
     "model": ground_observables.record_of(model, "subshower"),
 }
 fig = ground_observables.lateral_distributions(
-    by_group, "subshower", reference="dataset", reference_distance=100.0
+    by_group,
+    "subshower",
+    reference="dataset",
+    reference_distance=100.0,
+    particles="detected",
 )
 ```
 
-`reference` adds panels of each group's ratio to it under the lateral
-distributions and energy spectra. Passing `record_of` each population's
-`Responses`, and the array, adds the detector signal.
+Every figure function takes `particles`, `"all"` (the default) or
+`"detected"`. A record can hold both kinds: those of all particles are
+under keys starting `ground_`, and those of detected particles under keys
+starting `detected_`. A group without the kind a figure draws is listed in
+its legend, but has no lines. `reference` adds panels of each group's ratio
+to it under the lateral distributions and energy spectra. Passing
+`record_of` each population's `Responses`, and the array, adds the detector
+signal.
 
 ## Plotting showers
 

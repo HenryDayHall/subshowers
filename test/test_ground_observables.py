@@ -15,6 +15,7 @@ import pytest  # noqa: E402
 from subshowers import detector, ground, observables  # noqa: E402
 from subshowers import ground_observables as go  # noqa: E402
 from subshowers.ground import GroundSummaries  # noqa: E402
+from subshowers.population_plotting import group_colours  # noqa: E402
 from subshowers.responses import Responses  # noqa: E402
 
 ARRAY = detector.HorizontalCircles(
@@ -105,14 +106,16 @@ def test_entries_and_records():
         go.entries_of(summaries, "subshower", responses)
 
 
-def all_figures(by_group, frame, reference=None):
+def all_figures(by_group, frame, reference=None, particles="all"):
     distance = ground.DEFAULT_REFERENCE_DISTANCE[frame]
     return [
-        go.lateral_distributions(by_group, frame, reference, distance, "test"),
-        go.energy_spectra(by_group, reference, "test"),
-        go.particle_numbers(by_group, "test"),
-        go.arrival_times(by_group, frame, "test"),
-        go.readings_at_reference(by_group, frame, distance, "test"),
+        go.lateral_distributions(
+            by_group, frame, reference, distance, "test", particles=particles
+        ),
+        go.energy_spectra(by_group, reference, "test", particles=particles),
+        go.particle_numbers(by_group, "test", particles=particles),
+        go.arrival_times(by_group, frame, "test", particles=particles),
+        go.readings_at_reference(by_group, frame, distance, "test", particles),
     ]
 
 
@@ -147,6 +150,73 @@ def test_figures_without_signal_times_or_primary():
         plt.close(fig)
     with pytest.raises(ValueError, match="reference"):
         go.energy_spectra(by_group, reference="CORSIKA 8")
+
+
+def test_detected_entries_and_figures():
+    """
+    A dataset with all its particles and those detected, against a model
+    that only makes particles which reach detectors.
+    """
+    samples = samples_of([SOME, MANY, SOME])
+    responses = Responses.from_samples(samples, len(ARRAY))
+    everything = GroundSummaries.from_samples(samples)
+    # say only the particles within 100 m of the axis reach a detector
+    near = []
+    for sample in samples:
+        keep = np.hypot(sample.ground_x, sample.ground_y) < 100
+        near.append(
+            SimpleNamespace(
+                **{
+                    **vars(sample),
+                    **{
+                        name: np.asarray(getattr(sample, name))[keep]
+                        for name in [
+                            "ground_pdg",
+                            "ground_x",
+                            "ground_y",
+                            "ground_kinetic_energy",
+                            "ground_time",
+                        ]
+                    },
+                }
+            )
+        )
+    detected = GroundSummaries.from_samples(near, particles="detected")
+    entries = go.entries_of(detected, "subshower")
+    assert sorted(entries) == [
+        "detected_at_reference",
+        "detected_delay_sum",
+        "detected_delay_sum2",
+        "detected_lateral",
+        "detected_number",
+        "detected_spectrum",
+    ]
+    dataset = go.record_of(everything, "subshower", responses, ARRAY)
+    dataset.update(entries)
+    model = go.record_of(
+        GroundSummaries.from_samples(near[::-1], particles="detected"), "subshower"
+    )
+    by_group = {"dataset": dataset, "model": model}
+    colours = set(group_colours(by_group).values())
+
+    def lines_in_first_panel(fig):
+        return [line for line in fig.axes[0].lines if line.get_color() in colours]
+
+    # of all particles, only the dataset has a line; of detected ones, both do
+    fig = go.lateral_distributions(by_group, "subshower", particles="all")
+    assert len(lines_in_first_panel(fig)) == 1
+    plt.close(fig)
+    fig = go.lateral_distributions(by_group, "subshower", particles="detected")
+    assert len(lines_in_first_panel(fig)) == 2
+    assert "detected particles per m²" in fig.axes[0].get_ylabel()
+    plt.close(fig)
+    for fig in all_figures(
+        by_group, "subshower", reference="model", particles="detected"
+    ):
+        fig.canvas.draw()
+        plt.close(fig)
+    with pytest.raises(ValueError, match="particles"):
+        go.energy_spectra(by_group, particles="some")
 
 
 def test_means():

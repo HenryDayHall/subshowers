@@ -31,6 +31,16 @@ generative model's output, can be compared. GroundSummaries holds them for
 many subshowers. Positions are in metres, as in the history, with the ground
 at z = height (0 is CORSIKA's observation level); times in the history are
 in seconds, and delays here are in nanoseconds.
+
+The same summaries can be made of only the leaves that hit some detector,
+as responses.Responses records them (GroundSummaries.detected_in): the part
+of each summary that a detector array observes, which is what a generative
+model that only makes particles reaching detectors should reproduce. Those
+particles are placed where they hit their detectors, at the detectors' own
+heights, and by default (GroundSettings.from_config) the ground is at the
+detectors' height too, so for an array on one level, such as
+detector.generate_at_ground makes, each detected particle is just where it
+reaches the ground.
 """
 
 import json
@@ -54,6 +64,10 @@ NEUTRINOS = (12, 14, 16)
 
 # the frames distances and delays are measured in, as above
 FRAMES = ["subshower", "shower"]
+
+# which of a subshower's particles on the ground are summarised: all of them,
+# or only those that hit some detector on the way (see GroundSummaries)
+PARTICLES = ["all", "detected"]
 
 # kinetic energy (GeV) below which a particle isn't counted: the defaults of
 # c8_air_shower_with_history's --emcut, --mucut and --hadcut
@@ -147,7 +161,8 @@ class GroundSettings:
     readings are taken. Missing entries take the defaults.
 
     height : float
-        Height of the ground, in the history's coordinates (m).
+        Height of the ground, in the history's coordinates (m). from_config
+        takes it from the detector array if the config leaves it out.
     min_kinetic_energy : dict
         {species: GeV} below which particles aren't counted.
     reference_distance : dict
@@ -205,11 +220,17 @@ class GroundSettings:
         return filled
 
     @classmethod
-    def from_config(cls, config):
-        """The settings in a config's ground section, which may be left out."""
+    def from_config(cls, config, array=None):
+        """
+        The settings in a config's ground section, which may be left out.
+        Without a height, the ground is at the height of array, the detector
+        array the config describes (detector_height), if it's given, so that
+        what reaches the ground is what reaches the detectors' level; and
+        otherwise at 0, CORSIKA's observation level.
+        """
         section = config.get("ground") if isinstance(config, dict) else None
         if section is None:
-            return cls()
+            section = {}
         if not isinstance(section, dict):
             raise GroundConfigError(
                 f"the ground section must be a mapping, not {section!r}"
@@ -222,6 +243,10 @@ class GroundSettings:
                 f"the ground section has {unknown}; it can have height,"
                 " min_kinetic_energy and reference_distance"
             )
+        if section.get("height") is None and array is not None:
+            section = {**section, "height": detector_height(array)}
+        elif section.get("height") is None:
+            section = {key: value for key, value in section.items() if key != "height"}
         return cls(**section)
 
     def as_dict(self):
@@ -368,6 +393,108 @@ def leaves_to_ground(pdg, position, momentum, kinetic_energy, time, height=0.0):
     return pdg[reaches], ground_position, kinetic_energy[reaches], ground_time
 
 
+# ----------------------------------------------------------- the detectors
+
+
+def detector_height(array):
+    """The height (m) of a detector array: the median height of its detectors."""
+    return float(np.median(np.asarray(array.centers, dtype=float)[:, 2]))
+
+
+def _detector_planes(array):
+    """
+    The plane of each detector of an array, as (heights, normals, offsets):
+    heights (N,) of horizontal detectors, nan for others, and for every
+    detector its plane's normal (N, 3) and offset (N,), with normal · x =
+    offset on the plane. None for kinds of array other than
+    detector.HorizontalCircles and detector.Triangles.
+    """
+    if isinstance(array, _detector.HorizontalCircles):
+        heights = np.asarray(array.centers, dtype=float)[:, 2].copy()
+        normals = np.tile([0.0, 0.0, 1.0], (len(heights), 1))
+        return heights, normals, heights.copy()
+    if isinstance(array, _detector.Triangles):
+        edges = np.asarray(array.edges, dtype=float)
+        normals = np.cross(edges[:, 1] - edges[:, 0], edges[:, 2] - edges[:, 0])
+        flat = (normals[:, 0] == 0) & (normals[:, 1] == 0) & (normals[:, 2] != 0)
+        heights = np.where(flat, edges[:, 0, 2], np.nan)
+        offsets = np.einsum("nk,nk->n", normals, edges[:, 0])
+        return heights, normals, offsets
+    return None
+
+
+def _plane_distances(position, direction, heights, normals, offsets):
+    """
+    (M, N) distance along each line, from position along a unit direction,
+    to the plane of each detector; nan or infinite where they're parallel.
+    """
+    flat = np.isfinite(heights)
+    distance = np.empty((len(position), len(heights)))
+    # as to_ground works it out, so a flat array places particles just as the
+    # ground at its height does
+    distance[:, flat] = (position[:, None, 2] - heights[None, flat]) / -direction[
+        :, None, 2
+    ]
+    if (~flat).any():
+        normal = normals[~flat]
+        distance[:, ~flat] = (offsets[None, ~flat] - position @ normal.T) / (
+            direction @ normal.T
+        )
+    return distance
+
+
+def leaves_to_detectors(
+    pdg, position, momentum, kinetic_energy, time, array, chunk_size=2000
+):
+    """
+    Where and when leaves hit a detector of an array, given as for
+    leaves_to_ground: each is placed where its line meets the plane of the
+    first detector it reaches (of those it hits, as the detector sampler
+    finds them), at that detector's height. Leaves that hit no detector are
+    left out. For kinds of array whose planes aren't known here, leaves are
+    carried to the array's height instead (detector_height).
+
+    Returns pdg, position (M, 3), kinetic_energy, time of those that hit.
+    """
+    pdg = np.asarray(pdg).reshape(-1)
+    position = np.asarray(position, dtype=float).reshape(-1, 3)
+    momentum = np.asarray(momentum, dtype=float).reshape(-1, 3)
+    kinetic_energy = np.asarray(kinetic_energy, dtype=float).reshape(-1)
+    time = np.asarray(time, dtype=float).reshape(-1)
+    planes = _detector_planes(array)
+    if planes is None:
+        return leaves_to_ground(
+            pdg, position, momentum, kinetic_energy, time, detector_height(array)
+        )
+    heights, normals, offsets = planes
+    speed = speeds(pdg, kinetic_energy, momentum)
+    n_leaves = len(pdg)
+    hit = np.zeros(n_leaves, dtype=bool)
+    where = np.zeros((n_leaves, 3))
+    when = np.zeros(n_leaves)
+    for start in range(0, n_leaves, chunk_size):
+        part = slice(start, start + chunk_size)
+        p, m = position[part], momentum[part]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            direction = m / np.linalg.norm(m, axis=-1)[:, None]
+            hits = array.hit_any(p, m)
+            distance = _plane_distances(p, direction, heights, normals, offsets)
+            distance = np.where(
+                hits & np.isfinite(distance) & (distance >= 0), distance, np.inf
+            )
+            first = np.argmin(distance, axis=1)
+            length = distance[np.arange(len(p)), first]
+            reached = np.isfinite(length) & (speed[part] > 0)
+            length = np.where(reached, length, 0.0)
+            point = p + direction * length[:, None]
+            flat = np.isfinite(heights[first])
+            point[flat, 2] = heights[first][flat]
+            hit[part] = reached
+            where[part] = point
+            when[part] = time[part] + length / (speed[part] * SPEED_OF_LIGHT)
+    return pdg[hit], where[hit], kinetic_energy[hit], when[hit]
+
+
 def _empty_summary():
     return {
         name: np.zeros(shape, dtype=dtype)
@@ -492,6 +619,13 @@ class GroundSummaries:
     gives. Like responses.Responses, but for the ground rather than a
     detector array, so it can be made from the dataset (from_source) or from
     a generative model's subshowers (from_samples), and compared.
+
+    particles says which of the subshowers' particles are summarised: "all"
+    that reach the ground, or only those "detected", i.e. that hit some
+    detector on the way (detected_in). The detected ones are summarised just
+    as the others are, so their histograms are the part of the others that
+    the array observes, and can be compared with a generative model's that
+    only makes particles which reach detectors.
     """
 
     # one value per subshower, and its type
@@ -512,7 +646,9 @@ class GroundSummaries:
     ]
     FORMAT_VERSION = 1
 
-    def __init__(self, values, histograms, settings=None, metadata=None):
+    def __init__(
+        self, values, histograms, settings=None, metadata=None, particles="all"
+    ):
         """
         Parameters
         ----------
@@ -526,7 +662,12 @@ class GroundSummaries:
             The settings they were made with.
         metadata : dict
             Anything that can be written as json.
+        particles : str
+            Which particles are summarised, one of PARTICLES.
         """
+        if particles not in PARTICLES:
+            raise ValueError(f"particles must be one of {PARTICLES}, not {particles!r}")
+        self.particles = particles
         shapes = _histogram_shapes()
         n_subshowers = len(np.asarray(histograms["number"]))
         self.histograms = {}
@@ -551,7 +692,10 @@ class GroundSummaries:
 
     @property
     def reaches_ground(self):
-        """True for subshowers that put some counted particle on the ground."""
+        """
+        True for subshowers that put some counted particle on the ground, or
+        for detected particles, on a detector.
+        """
         return self.histograms["number"].sum(axis=1) > 0
 
     def axes(self, frame):
@@ -562,7 +706,7 @@ class GroundSummaries:
     # ----------------------------------------------------------- building
 
     @classmethod
-    def _build(cls, rows, settings, metadata):
+    def _build(cls, rows, settings, metadata, particles):
         """From a list of (values, histograms) for each subshower."""
         names = list(cls.scalar_columns) + cls.vector_columns
         values = {name: [row[0][name] for row in rows] for name in names}
@@ -577,20 +721,26 @@ class GroundSummaries:
                 name: np.zeros((0, 3)) if name in cls.vector_columns else []
                 for name in names
             }
-        return cls(values, histograms, settings, metadata)
+        return cls(values, histograms, settings, metadata, particles)
 
     @classmethod
-    def from_samples(cls, samples, settings=None, source=None, metadata=None):
+    def from_samples(
+        cls, samples, settings=None, source=None, metadata=None, particles="all"
+    ):
         """
         Summaries of subshowers given as particles on the ground, such as a
-        generative model makes. Each sample needs
+        generative model makes. particles is "detected" if they're only the
+        particles that hit a detector, as from a model that only makes
+        those, or "all" if they're all that reach the ground. Each sample
+        needs
 
         * start_pdg, start_kinetic_energy, start_time, start_position and
           start_direction, as for responses.Responses.from_samples;
         * ground_pdg, ground_x, ground_y and ground_kinetic_energy, with a
-          value for each particle reaching the ground (at settings.height),
-          and ground_time if arrival times are known (in seconds, the
-          history's units);
+          value for each particle reaching the ground, and ground_time if
+          arrival times are known (in seconds, the history's units). They're
+          at settings.height, or at ground_z if the sample gives it, as for
+          particles where they hit detectors at different heights;
         * primary_position, primary_direction and primary_time, for
           distances and delays about the shower's axis; without them, those
           histograms are nan.
@@ -623,16 +773,19 @@ class GroundSummaries:
             }
             x = np.asarray(sample.ground_x, dtype=float).reshape(-1)
             y = np.asarray(sample.ground_y, dtype=float).reshape(-1)
+            z = getattr(sample, "ground_z", None)
+            if z is None:
+                z = np.full(len(x), settings.height)
             histograms = summarise(
                 sample.ground_pdg,
-                np.column_stack((x, y)),
+                np.column_stack((x, y, np.asarray(z, dtype=float).reshape(-1))),
                 sample.ground_kinetic_energy,
                 getattr(sample, "ground_time", None),
                 axes=cls._axes_of(values),
                 settings=settings,
             )
             rows.append((values, histograms))
-        return cls._build(rows, settings, metadata)
+        return cls._build(rows, settings, metadata, particles)
 
     @staticmethod
     def _axes_of(values):
@@ -651,13 +804,27 @@ class GroundSummaries:
 
     @classmethod
     def from_source(
-        cls, source, subshower_numbers, settings=None, metadata=None, progress=None
+        cls,
+        source,
+        subshower_numbers,
+        settings=None,
+        metadata=None,
+        progress=None,
+        leaves=None,
+        particles="all",
+        array=None,
     ):
         """
         Summaries of some of a sampling.DatasetSource's subshowers, picked
         by their number within it (as Responses.values["subshower_number"]
         records them), in that order. progress, if given, wraps the numbers
         as they're used, e.g. to print how far it has got.
+
+        By default every leaf of each subshower is summarised. Given leaves,
+        a list with the history index labels of the leaves to summarise for
+        each subshower, only those are, and particles says which they are
+        (see detected_in). Leaves are carried to the ground, or given a
+        detector array, to the detectors they hit (leaves_to_detectors).
         """
         settings = settings or GroundSettings()
         reader = source.reader
@@ -678,9 +845,18 @@ class GroundSummaries:
                 ),
             }
         numbers = np.asarray(subshower_numbers, dtype=np.int64).reshape(-1)
+        if leaves is not None:
+            leaves = list(leaves)
+            if len(leaves) != len(numbers):
+                raise ValueError(
+                    f"leaves for {len(leaves)} subshowers, not {len(numbers)}"
+                )
         rows = []
-        for number in progress(numbers) if progress is not None else numbers:
+        chosen = progress(numbers) if progress is not None else numbers
+        for k, number in enumerate(chosen):
             start_index, leaf_indices = source[int(number)]
+            if leaves is not None:
+                leaf_indices = leaves[k]
             start = int(np.atleast_1d(positions_of(start_index))[0])
             values = {
                 "source": source.name,
@@ -694,15 +870,19 @@ class GroundSummaries:
                 ),
                 **primary,
             }
-            leaves = positions_of(np.asarray(leaf_indices))
-            pdg, ground_position, kinetic_energy, ground_time = leaves_to_ground(
-                columns["pdg"][leaves],
-                np.stack([columns[c][leaves] for c in "xyz"], axis=-1),
-                np.stack([columns[c][leaves] for c in ["px", "py", "pz"]], axis=-1),
-                columns["kinetic_energy"][leaves],
-                columns["time"][leaves],
-                settings.height,
+            used = positions_of(np.asarray(leaf_indices, dtype=np.int64))
+            leaf_values = (
+                columns["pdg"][used],
+                np.stack([columns[c][used] for c in "xyz"], axis=-1),
+                np.stack([columns[c][used] for c in ["px", "py", "pz"]], axis=-1),
+                columns["kinetic_energy"][used],
+                columns["time"][used],
             )
+            if array is None:
+                placed = leaves_to_ground(*leaf_values, settings.height)
+            else:
+                placed = leaves_to_detectors(*leaf_values, array)
+            pdg, ground_position, kinetic_energy, ground_time = placed
             histograms = summarise(
                 pdg,
                 ground_position,
@@ -712,17 +892,58 @@ class GroundSummaries:
                 settings=settings,
             )
             rows.append((values, histograms))
-        return cls._build(rows, settings, metadata)
+        return cls._build(rows, settings, metadata, particles)
+
+    @classmethod
+    def detected_in(
+        cls, source, responses, settings=None, metadata=None, progress=None, array=None
+    ):
+        """
+        Summaries of the particles that hit some detector, of the subshowers
+        of a responses.Responses measured from a sampling.DatasetSource, in
+        the same order, counted as the ground summaries are. Given the array
+        the responses were measured with, each particle is placed where it
+        hits its detector, at that detector's height (leaves_to_detectors);
+        without it, where its line meets the ground.
+        """
+        if not responses.keeps_detected_leaves:
+            raise ValueError("the responses don't record which leaves hit a detector")
+        if array is not None and len(array) != responses.n_detectors:
+            raise ValueError(
+                f"the responses were measured with {responses.n_detectors}"
+                f" detectors, not {len(array)}"
+            )
+        names = set(responses.values["source"].tolist())
+        if names - {source.name}:
+            raise ValueError(
+                f"the responses are of {sorted(names)}, not just {source.name!r}"
+            )
+        return cls.from_source(
+            source,
+            responses.values["subshower_number"],
+            settings,
+            metadata,
+            progress,
+            leaves=[responses.detected_leaf_indices(i) for i in range(len(responses))],
+            particles="detected",
+            array=array,
+        )
 
     @classmethod
     def concatenate(cls, parts, metadata=None):
-        """All the subshowers of several GroundSummaries made with one setting."""
+        """
+        All the subshowers of several GroundSummaries, made with one setting
+        and of the same particles.
+        """
         parts = list(parts)
         if not parts:
             raise ValueError("nothing to concatenate")
         settings = parts[0].settings
         if any(part.settings.as_dict() != settings.as_dict() for part in parts):
             raise ValueError("the parts were made with different ground settings")
+        particles = parts[0].particles
+        if any(part.particles != particles for part in parts):
+            raise ValueError("the parts summarise different particles")
         return cls(
             {
                 name: np.concatenate([part.values[name] for part in parts])
@@ -734,6 +955,7 @@ class GroundSummaries:
             },
             settings,
             metadata,
+            particles,
         )
 
     def select(self, which):
@@ -744,6 +966,7 @@ class GroundSummaries:
             {name: array[indices] for name, array in self.histograms.items()},
             self.settings,
             self.metadata,
+            self.particles,
         )
 
     # ------------------------------------------------------- saving, loading
@@ -754,6 +977,7 @@ class GroundSummaries:
             "format_version": np.array(self.FORMAT_VERSION),
             "settings": np.array(json.dumps(self.settings.as_dict())),
             "metadata": np.array(json.dumps(self.metadata)),
+            "particles": np.array(self.particles),
             "species": np.array(json.dumps(SPECIES)),
             "frames": np.array(json.dumps(FRAMES)),
             "radius_edges": RADIUS_EDGES,
@@ -787,11 +1011,14 @@ class GroundSummaries:
             if not same_bins:
                 raise ValueError(f"{path} was made with other bins or species")
             names = list(cls.scalar_columns) + cls.vector_columns
+            # files from before detected particles were summarised are of all
+            particles = str(data["particles"]) if "particles" in data else "all"
             return cls(
                 {name: data[f"value_{name}"] for name in names},
                 {name: data[f"histogram_{name}"] for name in HISTOGRAMS},
                 GroundSettings(**json.loads(data["settings"].item())),
                 json.loads(data["metadata"].item()),
+                particles,
             )
 
     @classmethod

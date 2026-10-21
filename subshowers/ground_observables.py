@@ -14,12 +14,22 @@ for each group: the mean over its subshowers, with a band of the standard
 error of that mean. Given reference, the name of one group, the lateral
 distributions and energy spectra also get panels of each group's ratio to
 it, e.g. a generative model's to the dataset's.
+
+Records can hold the observables of all the particles that reach the
+ground, under keys starting ground_, and of only those that hit a detector,
+under keys starting detected_ (see PARTICLES); each figure is drawn of one
+or the other with particles="all" or "detected". The detected particles are
+counted in the same bins and divided by the same areas (of the shower plane,
+not of the detectors), so their curves are the part of the others that the
+array observes. A generative model that only makes particles reaching the
+detectors is compared with the dataset's detected particles; groups without
+the observables a figure draws are listed, but have no lines.
 """
 
 import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.ticker import NullFormatter
+from matplotlib.ticker import FuncFormatter, NullFormatter
 
 from subshowers import ground, observables
 from subshowers.population_plotting import GREY, bin_edges, group_colours
@@ -31,6 +41,25 @@ GRID = {"color": "#e4e3df", "linewidth": 0.5}
 MUTED = "#6b6a66"
 N_ENERGY_BINS = 10  # bins of start kinetic energy, for profiles against it
 
+# For each of ground.PARTICLES: the start of the keys of their observables
+# in a record, and how figures describe them
+PARTICLES = {
+    "all": {"key": "ground", "where": "reaching the ground", "adjective": ""},
+    "detected": {
+        "key": "detected",
+        "where": "reaching a detector",
+        "adjective": "detected ",
+    },
+}
+
+
+def _words(particles):
+    if particles not in PARTICLES:
+        raise ValueError(
+            f"particles must be one of {list(PARTICLES)}, not {particles!r}"
+        )
+    return PARTICLES[particles]
+
 
 # ------------------------------------------------------------------ records
 
@@ -39,21 +68,23 @@ def entries_of(summaries, frame="subshower", responses=None, array=None):
     """
     {name: list with an entry per subshower} of the ground observables of a
     ground.GroundSummaries, measuring distances and delays about the axis of
-    frame ("subshower" or "shower"). Given the responses.Responses of the
-    same subshowers and the array they were measured with, the detector
-    signal about the same axis is added.
+    frame ("subshower" or "shower"). Their names start ground_, or for
+    summaries of detected particles, detected_. Given the
+    responses.Responses of the same subshowers and the array they were
+    measured with, the detector signal about the same axis is added.
     """
     if frame not in ground.FRAMES:
         raise ValueError(f"frame must be one of {ground.FRAMES}, not {frame!r}")
     f = ground.FRAMES.index(frame)
+    key = _words(summaries.particles)["key"]
     histograms = summaries.histograms
     entries = {
-        "ground_number": list(histograms["number"]),
-        "ground_spectrum": list(histograms["spectrum"]),
-        "ground_lateral": list(histograms["lateral"][:, f]),
-        "ground_delay_sum": list(histograms["delay_sum"][:, f]),
-        "ground_delay_sum2": list(histograms["delay_sum2"][:, f]),
-        "ground_at_reference": list(histograms["at_reference"][:, f]),
+        f"{key}_number": list(histograms["number"]),
+        f"{key}_spectrum": list(histograms["spectrum"]),
+        f"{key}_lateral": list(histograms["lateral"][:, f]),
+        f"{key}_delay_sum": list(histograms["delay_sum"][:, f]),
+        f"{key}_delay_sum2": list(histograms["delay_sum2"][:, f]),
+        f"{key}_at_reference": list(histograms["at_reference"][:, f]),
     }
     if responses is not None:
         if array is None:
@@ -170,14 +201,39 @@ def _log_limits(values, pad=3.0):
     return values.min() / pad, values.max() * pad
 
 
+def _one_two_five(value, _=None):
+    """A tick label for 1, 2 and 5 times a power of ten; none for others."""
+    if not value > 0:
+        return ""
+    exponent = int(np.floor(np.log10(value) + 1e-9))
+    mantissa = value / 10.0**exponent
+    if not np.isclose(mantissa, [1, 2, 5], rtol=1e-6).any():
+        return ""
+    if 1e-2 <= value < 1e4:
+        return f"{value:g}"
+    if np.isclose(mantissa, 1):
+        return f"$10^{{{exponent}}}$"
+    return f"${mantissa:.0f}\\times10^{{{exponent}}}$"
+
+
 def _tidy_log_ticks(ax):
-    """Leave minor ticks unlabelled on log axes spanning most of a decade or more."""
+    """
+    Label log axes clearly: with two or more powers of ten in range, only
+    those; with fewer, 1, 2 and 5 times powers of ten, so there's always a
+    label or two.
+    """
     for axis, limits in [(ax.xaxis, ax.get_xlim()), (ax.yaxis, ax.get_ylim())]:
         if axis.get_scale() != "log":
             continue
         lo, hi = sorted(limits)
-        if lo > 0 and np.log10(hi / lo) > 0.7:
+        if not lo > 0:
+            continue
+        powers = np.floor(np.log10(hi) + 1e-9) - np.ceil(np.log10(lo) - 1e-9) + 1
+        if powers >= 2:
             axis.set_minor_formatter(NullFormatter())
+        else:
+            axis.set_major_formatter(FuncFormatter(_one_two_five))
+            axis.set_minor_formatter(FuncFormatter(_one_two_five))
 
 
 def _draw_curves(ax, x, curves, colours, log_x=True, log_y=True):
@@ -371,14 +427,22 @@ def _by_energy(record, values, edges, statistic="mean"):
 
 
 def lateral_distributions(
-    by_group, frame="subshower", reference=None, reference_distance=None, title=None
+    by_group,
+    frame="subshower",
+    reference=None,
+    reference_distance=None,
+    title=None,
+    particles="all",
 ):
     """
     The density of each kind of particle on the ground against distance
     from the axis (the lateral distribution function), as particles per m²
     of the shower plane, and, if the records have it, the energy deposited
-    per m² of detector against the detector's distance from the axis.
+    per m² of detector against the detector's distance from the axis. With
+    particles="detected", only the particles that hit a detector are
+    counted, still per m² of the shower plane.
     """
+    words = _words(particles)
     _check_reference(by_group, reference)
     colours = group_colours(by_group)
     has_signal = any("signal_deposit" in record for record in by_group.values())
@@ -389,7 +453,7 @@ def lateral_distributions(
     grid = fig.add_gridspec(1, len(columns))
     x = _centres(ground.RADIUS_EDGES)
     areas = _ring_areas(ground.RADIUS_EDGES)
-    lateral = _stacked(by_group, "ground_lateral")
+    lateral = _stacked(by_group, f"{words['key']}_lateral")
     deposits = _stacked(by_group, "signal_deposit")
     detector_areas = _stacked(by_group, "signal_area")
     for c, column in enumerate(columns):
@@ -414,7 +478,9 @@ def lateral_distributions(
         else:
             ax.set_title(ground.SPECIES_LABELS[column])
             if c == 0:
-                ax.set_ylabel("particles per m² (mean per subshower)")
+                ax.set_ylabel(
+                    f"{words['adjective']}particles per m² (mean per subshower)"
+                )
         if not drawn:
             _no_values(ax)
             if ratio_ax is not None:
@@ -424,15 +490,20 @@ def lateral_distributions(
             if ratio_ax is not None and reference in drawn:
                 _draw_ratios(ratio_ax, x, curves, colours, reference)
         (ratio_ax or ax).set_xlabel(_axis_label(frame))
-    _legend(fig, by_group, title or "Lateral distributions on the ground")
+    _legend(
+        fig, by_group, title or f"Lateral distributions of particles {words['where']}"
+    )
     return fig
 
 
-def energy_spectra(by_group, reference=None, title=None):
+def energy_spectra(by_group, reference=None, title=None, particles="all"):
     """
     The kinetic energy spectrum of each kind of particle reaching the
-    ground: particles per decade of energy, as a mean per subshower.
+    ground, or with particles="detected" a detector: particles per decade of
+    energy, as a mean per subshower. Energies are as the particles were
+    made (see subshowers.ground).
     """
+    words = _words(particles)
     _check_reference(by_group, reference)
     colours = group_colours(by_group)
     columns = list(ground.SPECIES)
@@ -443,7 +514,7 @@ def energy_spectra(by_group, reference=None, title=None):
     edges = ground.ENERGY_EDGES
     x = _centres(edges)
     widths = np.diff(np.log10(edges))
-    spectra = _stacked(by_group, "ground_spectrum")
+    spectra = _stacked(by_group, f"{words['key']}_spectrum")
     for c, species in enumerate(columns):
         ax, ratio_ax = _panel(fig, grid[0, c], reference is not None)
         curves = {}
@@ -453,25 +524,30 @@ def energy_spectra(by_group, reference=None, title=None):
         drawn = _draw_curves(ax, x, curves, colours)
         ax.set_title(ground.SPECIES_LABELS[species])
         if c == 0:
-            ax.set_ylabel("particles per decade of energy\n(mean per subshower)")
+            ax.set_ylabel(
+                f"{words['adjective']}particles per decade of energy\n"
+                "(mean per subshower)"
+            )
         if not drawn:
             _no_values(ax)
             if ratio_ax is not None:
                 ratio_ax.set_ylim(0.5, 1.5)
         elif ratio_ax is not None and reference in drawn:
             _draw_ratios(ratio_ax, x, curves, colours, reference)
-        (ratio_ax or ax).set_xlabel("kinetic energy on reaching the ground [GeV]")
-    _legend(fig, by_group, title or "Energy spectra on the ground")
+        (ratio_ax or ax).set_xlabel("kinetic energy [GeV]")
+    _legend(fig, by_group, title or f"Energy spectra of particles {words['where']}")
     return fig
 
 
-def particle_numbers(by_group, title=None):
+def particle_numbers(by_group, title=None, particles="all"):
     """
-    How many of each kind of particle reach the ground: the fraction of
-    subshowers with at least N, the mean number against start kinetic
-    energy, and the relative fluctuations (standard deviation over mean)
-    against start kinetic energy.
+    How many of each kind of particle reach the ground, or with
+    particles="detected" a detector: the fraction of subshowers with at
+    least N, the mean number against start kinetic energy, and the relative
+    fluctuations (standard deviation over mean) against start kinetic
+    energy.
     """
+    words = _words(particles)
     colours = group_colours(by_group)
     columns = list(ground.SPECIES)
     fig, axarr = plt.subplots(
@@ -479,10 +555,11 @@ def particle_numbers(by_group, title=None):
     )
     edges = _energy_edges(by_group)
     centres = np.sqrt(edges[:-1] * edges[1:])
-    all_numbers = _stacked(by_group, "ground_number")
+    all_numbers = _stacked(by_group, f"{words['key']}_number")
     for c, species in enumerate(columns):
         s = ground.SPECIES.index(species)
         label = ground.SPECIES_LABELS[species]
+        some = f"{words['adjective']}{label}"
         numbers = {group: values[:, s] for group, values in all_numbers.items()}
 
         ax = axarr[0, c]
@@ -504,18 +581,19 @@ def particle_numbers(by_group, title=None):
             )
             drawn = True
         ax.set_title(label)
-        ax.set_xlabel(f"N, number of {label} on the ground")
+        ax.set_xlabel(f"N, number of {label} {words['where']}")
         if c == 0:
             ax.set_ylabel("fraction of subshowers\nwith at least N")
         if drawn:
             ax.set_xscale("log")
             ax.set_yscale("log")
+            _tidy_log_ticks(ax)
         else:
-            _no_values(ax, f"no subshower put {label} on the ground")
+            _no_values(ax, f"no subshower had\n{label} {words['where']}")
 
         for row, statistic, y_label in [
-            (1, "mean", f"mean number of {label}"),
-            (2, "spread", f"standard deviation / mean\nof the number of {label}"),
+            (1, "mean", f"mean number of {some}"),
+            (2, "spread", f"standard deviation / mean\nof the number of {some}"),
         ]:
             ax = axarr[row, c]
             _style(ax)
@@ -533,27 +611,29 @@ def particle_numbers(by_group, title=None):
                 _no_values(ax)
             elif statistic == "spread":
                 ax.set_ylim(bottom=0)
-    _legend(fig, by_group, title or "Numbers of particles on the ground")
+    _legend(fig, by_group, title or f"Numbers of particles {words['where']}")
     return fig
 
 
-def arrival_times(by_group, frame="subshower", title=None):
+def arrival_times(by_group, frame="subshower", title=None, particles="all"):
     """
     When particles reach the ground, against distance from the axis: their
     mean delay after a plane front moving along the axis at the speed of
     light, and the standard deviation of their delays (the thickness of the
     shower front). Both are over all the particles of a group's subshowers
-    at that distance; the band is the standard error of the mean delay.
+    at that distance, or with particles="detected" those that hit a
+    detector; the band is the standard error of the mean delay.
     """
+    words = _words(particles)
     colours = group_colours(by_group)
     columns = list(ground.SPECIES)
     fig, axarr = plt.subplots(
         2, len(columns), figsize=(3.9 * len(columns), 7.5), layout="constrained"
     )
     x = _centres(ground.RADIUS_EDGES)
-    counts = _stacked(by_group, "ground_lateral")
-    totals = _stacked(by_group, "ground_delay_sum")
-    all_squares = _stacked(by_group, "ground_delay_sum2")
+    counts = _stacked(by_group, f"{words['key']}_lateral")
+    totals = _stacked(by_group, f"{words['key']}_delay_sum")
+    all_squares = _stacked(by_group, f"{words['key']}_delay_sum2")
     for c, species in enumerate(columns):
         s = ground.SPECIES.index(species)
         label = ground.SPECIES_LABELS[species]
@@ -593,26 +673,28 @@ def arrival_times(by_group, frame="subshower", title=None):
             if not drawn:
                 any_times = any(np.isfinite(m).any() for m, _ in means.values())
                 if not any_particles:
-                    _no_values(ax, f"no {label} on the ground")
+                    _no_values(ax, f"no {label} {words['where']}")
                 elif not any_times:
                     _no_values(ax, "no arrival times known")
                 else:
                     _no_values(ax, "too few particles")
-    _legend(fig, by_group, title or "Arrival times on the ground")
+    _legend(fig, by_group, title or f"Arrival times of particles {words['where']}")
     return fig
 
 
 def readings_at_reference(
-    by_group, frame="subshower", reference_distance=None, title=None
+    by_group, frame="subshower", reference_distance=None, title=None, particles="all"
 ):
     """
     What a ground array reads at the reference distance from the axis, like
     the Telescope Array's S800: the energy deposited per m² of detector
     there (S) for each subshower, and against start kinetic energy; and the
     density of electrons and positrons, and of muons, there against start
-    kinetic energy. Subshowers with no detector at that distance are left
-    out of S.
+    kinetic energy, counting with particles="detected" only those that hit
+    a detector. Subshowers with no detector at that distance are left out
+    of S.
     """
+    words = _words(particles)
     colours = group_colours(by_group)
     fig, axarr = plt.subplots(2, 2, figsize=(11.5, 9.5), layout="constrained")
     where = (
@@ -624,7 +706,7 @@ def readings_at_reference(
     centres = np.sqrt(edges[:-1] * edges[1:])
 
     signals = _stacked(by_group, "signal_at_reference")
-    at_reference = _stacked(by_group, "ground_at_reference")
+    at_reference = _stacked(by_group, f"{words['key']}_at_reference")
     ax = axarr[0, 0]
     _style(ax)
     ax.set_title(f"S, at {where}")
@@ -652,12 +734,21 @@ def readings_at_reference(
             patches.append(patch[0])
             labels.append(f"{group}: {nothing:.0%} read nothing")
         ax.set_xscale("log")
+        _tidy_log_ticks(ax)
         ax.legend(patches, labels, fontsize=7, frameon=False)
 
     panels = [
         (axarr[0, 1], "S", f"mean S at {where}\n[GeV m⁻²]"),
-        (axarr[1, 0], "electrons", f"mean density of e± at\n{where} [m⁻²]"),
-        (axarr[1, 1], "muons", f"mean density of μ± at\n{where} [m⁻²]"),
+        (
+            axarr[1, 0],
+            "electrons",
+            f"mean density of {words['adjective']}e± at\n{where} [m⁻²]",
+        ),
+        (
+            axarr[1, 1],
+            "muons",
+            f"mean density of {words['adjective']}μ± at\n{where} [m⁻²]",
+        ),
     ]
     for ax, quantity, y_label in panels:
         _style(ax)
@@ -682,5 +773,9 @@ def readings_at_reference(
                 _no_values(ax, "no detector responses")
             else:
                 _no_values(ax, "nothing there")
-    _legend(fig, by_group, title or "Readings at the reference distance")
+    _legend(
+        fig,
+        by_group,
+        title or f"Readings at the reference distance, of particles {words['where']}",
+    )
     return fig
