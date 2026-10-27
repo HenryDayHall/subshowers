@@ -336,7 +336,9 @@ def dataset(tmp_path_factory):
     source = DatasetSource(
         folder, output_path=os.path.join(folder, "subshowers_e100.0.h5"), name="e1e5_0"
     )
-    samples = list(SubshowerSampler([source], array, seed=1).iter_epoch())
+    # where they were simulated, as the ground summaries have them
+    sampler = SubshowerSampler([source], array, seed=1, shift=False)
+    samples = list(sampler.iter_epoch())
     return source, array, Responses.from_samples(samples, len(array))
 
 
@@ -396,7 +398,7 @@ def test_shifted_responses_not_aligned(dataset):
     each one's axis would be measured about the wrong place.
     """
     source, array, responses = dataset
-    sampler = SubshowerSampler([source], array, seed=1, shift=True)
+    sampler = SubshowerSampler([source], array, seed=1)  # shifting, by default
     shifted = Responses.from_samples(sampler.iter_epoch(), len(array))
     numbers = shifted.values["subshower_number"]
     # the same subshowers, in the same order

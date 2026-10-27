@@ -807,7 +807,8 @@ def check_aligned(summaries, responses):
     of the same subshowers, in the same order, starting in the same places:
     the detector signal about each subshower's axis needs its deposits
     measured where the summary has it, so not shifted across the ground (as
-    sampling.SubshowerSampler can) for one and not the other.
+    sampling.SubshowerSampler does, unless given shift=False) for one and
+    not the other.
     """
     if len(summaries) != len(responses):
         raise ValueError(

@@ -18,12 +18,13 @@ opened lazily and evicted LRU-style, and the epoch iterator visits sources
 one at a time (shuffled) rather than hopping between files per sample.
 
 A subshower is much the same wherever it falls: the atmosphere changes
-with height, not with x and y. So with shift=True the sampler moves each
-subshower it samples across the ground, by a random shift in x and y,
-before working out what the array sees of it. Each time a subshower is
-sampled it can reach other detectors, which augments the dataset. How far
-it can move depends on the array: by default, up to the spacing of its
-detectors (see detector.max_shift).
+with height, not with x and y. So the sampler moves each subshower it
+samples across the ground, by a random shift in x and y, before working
+out what the array sees of it. Each time a subshower is sampled it can
+reach other detectors, which augments the dataset. How far it can move
+depends on the array: by default, up to half the array's width (see
+detector.max_shift). shift=False keeps subshowers where they were
+simulated.
 
 Example
 -------
@@ -32,7 +33,7 @@ Example
 >>> array = detector.generate_pierre_auger()
 >>> sources = [DatasetSource(folder, energy_cut_value=100.0)
 ...            for folder in shower_folders]
->>> sampler = SubshowerSampler(sources, array, seed=42, shift=True)
+>>> sampler = SubshowerSampler(sources, array, seed=42)
 >>> for sample in sampler.iter_epoch(shuffle=True):
 ...     print(sample.source.name, sample.shift, sample.total_detected_energy)
 """
@@ -259,18 +260,20 @@ class SubshowerSampler:
     shift : bool
         Move each subshower sampled across the ground, by a random shift in
         x and y spread evenly over a disc of radius max_shift, before
-        working out what the array sees of it. A subshower is much the same
-        wherever it falls, so this augments the dataset: each time a
-        subshower is sampled, in each epoch, it can reach other detectors.
-        The start particle and the leaves move together, so each sample's
-        start_position is where the shifted subshower starts, and its shift
-        says how far it was moved. Shifts don't change the order subshowers
-        are drawn in, for a given seed.
+        working out what the array sees of it; on unless this is False. A
+        subshower is much the same wherever it falls, so this augments the
+        dataset: each time a subshower is sampled, in each epoch, it can
+        reach other detectors. The start particle and the leaves move
+        together, so each sample's start_position is where the shifted
+        subshower starts, and its shift says how far it was moved. Shifts
+        don't change the order subshowers are drawn in, for a given seed.
     max_shift : float, optional
         The furthest (m) a subshower is moved, with shift. By default it's
-        detector.max_shift(detector_array), the spacing of the array's
-        detectors, which is enough for a subshower to land anywhere
-        relative to them.
+        detector.max_shift(detector_array), half the width of the array, so
+        a subshower near the middle of the array can be moved to almost
+        anywhere over it. detector.spacing(detector_array) keeps subshowers
+        near where they were simulated, while still letting them land
+        anywhere relative to the detectors.
     """
 
     def __init__(
@@ -280,7 +283,7 @@ class SubshowerSampler:
         seed=None,
         max_open: int = 2,
         chunk_size: int = 20_000,
-        shift: bool = False,
+        shift: bool = True,
         max_shift: float = None,
     ):
         if isinstance(sources, DatasetSource):
@@ -359,7 +362,7 @@ class SubshowerSampler:
     def random_shift(self) -> _np.ndarray:
         """
         A shift for one subshower, (dx, dy, 0) in metres, spread evenly over
-        the disc of radius max_shift; no shift at all without shift=True.
+        the disc of radius max_shift; no shift at all with shift=False.
         """
         if not self.shift or self.max_shift == 0:
             return _np.zeros(3)
@@ -410,7 +413,7 @@ class SubshowerSampler:
         """
         What the array sees of one subshower, moved across the ground by
         shift, (dx, dy) in metres, if it's given. Otherwise it's moved by a
-        random_shift, which is no shift at all without shift=True.
+        random_shift, which is no shift at all with shift=False.
         """
         source = self._checkout(self.sources[source_number])
         start_index, leaf_indices = source[subshower_number]
@@ -483,39 +486,52 @@ class SubshowerSampler:
         clean, but may reload histories when consecutive draws land in
         different sources - keep max_open >= number of sources if the
         histories fit in memory.
+
+        With detected_only, a warning says when 100 subshowers in a row
+        have missed the array, and again at 1000, 10 000 and so on: shifted
+        over a sparse array, like the Pierre Auger surface detector, most
+        subshowers miss it, so long runs of misses come with nothing wrong.
         """
         produced = 0
         sequential_skips = 0
+        warn_at = 100  # misses in a row, ten times more after each warning
         while n_samples is None or produced < n_samples:
             global_index = int(self.rng.integers(len(self)))
             sample = self[global_index]
             if detected_only and sample.n_hit_detectors == 0:
                 sequential_skips += 1
-                if sequential_skips % 100 == 0:
-                    detector_mins = self.detector_array.centers.min(axis=0)
-                    detector_maxs = self.detector_array.centers.max(axis=0)
-                    random_source = self.sources[self.rng.choice(len(self.sources))]
-                    range_description = "Coordinates from; [detector, random shower]"
-                    for i, coord in enumerate(["x", "y", "z"]):
-                        detector_min = detector_mins[i]
-                        detector_max = detector_maxs[i]
-                        random_min = random_source.reader.data[coord].min()
-                        random_max = random_source.reader.data[coord].max()
-                        range_description += f"\n{coord}: {detector_min} to {detector_max}, {random_min} to {random_max}"
-                    if self.shift:
-                        range_description += (
-                            "\nThe subshowers are shifted across the ground"
-                            f" by up to {self.max_shift:.6g} m."
-                        )
-
-                    _warnings.warn(
-                        f"We have skipped {sequential_skips} sequential subshowers"
-                        " that didn't reach a detector.\n" + range_description
-                    )
+                if sequential_skips == warn_at:
+                    warn_at *= 10
+                    self._warn_missed(sequential_skips, sample.source)
                 continue
             sequential_skips = 0
             yield sample
             produced += 1
+
+    def _warn_missed(self, n_missed, source):
+        """
+        Warn that n_missed subshowers in a row didn't reach a detector, with
+        where the detectors are and where the particles of the last one's
+        shower are (its history is in memory already).
+        """
+        detector_mins = self.detector_array.centers.min(axis=0)
+        detector_maxs = self.detector_array.centers.max(axis=0)
+        data = source.reader.data
+        range_description = "Coordinates from; [detector, shower]"
+        for i, coord in enumerate(["x", "y", "z"]):
+            range_description += (
+                f"\n{coord}: {detector_mins[i]} to {detector_maxs[i]},"
+                f" {data[coord].min()} to {data[coord].max()}"
+            )
+        if self.shift:
+            range_description += (
+                "\nThe subshowers are shifted across the ground"
+                f" by up to {self.max_shift:.6g} m."
+            )
+        _warnings.warn(
+            f"We have skipped {n_missed} sequential subshowers"
+            " that didn't reach a detector.\n" + range_description
+        )
 
     def __iter__(self):
         return self.iter_epoch(shuffle=True)
