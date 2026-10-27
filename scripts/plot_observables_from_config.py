@@ -310,7 +310,9 @@ def measure(check, array, settings, path, args, reuse):
     start = time.monotonic()
     source = check.source()
     n_in_set = len(source)  # reads the set, and the shower's history
-    sampler = SubshowerSampler([source], array, seed=args.seed, max_open=1)
+    # not shifted across the ground: the ground observables are of the
+    # subshowers where they were simulated, and the responses go with them
+    sampler = SubshowerSampler([source], array, seed=args.seed, max_open=1, shift=False)
     n_wanted = n_in_set
     if args.max_subshowers is not None:
         n_wanted = min(n_in_set, args.max_subshowers)

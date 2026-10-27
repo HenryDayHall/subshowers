@@ -399,6 +399,56 @@ def is_unseeded(config):
     return "seed" in parameters and arguments.get("seed") is None
 
 
+def spacing(array):
+    """
+    The usual distance (m) between neighbouring detectors of an array: the
+    median, over the detectors, of the distance across the ground (in x and
+    y) from each one's centre to the nearest other one's. About 1.5 km for
+    the Pierre Auger surface detector, and 750 m for its sd750 grid.
+
+    Detectors in the same place, like the Pierre Auger stations replaced
+    where they stood, are counted once, and the array needs detectors in at
+    least two places to have a spacing.
+    """
+    centres = np.unique(np.asarray(array.centers, dtype=float)[:, :2], axis=0)
+    n_places = len(centres)
+    if n_places < 2:
+        raise ValueError(
+            f"the array has detectors in {n_places} place{'' if n_places == 1 else 's'},"
+            " so they have no spacing"
+        )
+    x, y = centres[:, 0], centres[:, 1]
+    nearest2 = np.empty(n_places)
+    # from some detectors at a time, so at most a few million distances are held
+    step = max(1, 2_000_000 // n_places)
+    for start in range(0, n_places, step):
+        stop = min(start + step, n_places)
+        distance2 = (x[start:stop, None] - x[None, :]) ** 2
+        distance2 += (y[start:stop, None] - y[None, :]) ** 2
+        # not from a detector to itself
+        distance2[np.arange(stop - start), np.arange(start, stop)] = np.inf
+        nearest2[start:stop] = distance2.min(axis=1)
+    return float(np.median(np.sqrt(nearest2)))
+
+
+def max_shift(array):
+    """
+    The furthest (m) the sampler moves a subshower across the ground when it
+    shifts subshowers to augment the data (see sampling.SubshowerSampler):
+    the spacing of the array's detectors.
+
+    A subshower is much the same wherever it falls, so shifting it changes
+    only which detectors it reaches. No point of a square grid is further
+    than 0.71 of a spacing from a detector, nor of a triangular grid, like
+    the Pierre Auger surface detector, further than 0.58, so shifts of up to
+    a spacing can put any part of a subshower over a detector: the subshower
+    can land anywhere relative to the grid. Yet it stays near where it was
+    simulated, in the same part of the array, and about as far from the core
+    of its shower and from the edges of the array.
+    """
+    return spacing(array)
+
+
 def edges_from_coords(northing, easting, altitude, single_detector, center=None):
     if center is None:
         center = np.mean([northing, easting], axis=0)

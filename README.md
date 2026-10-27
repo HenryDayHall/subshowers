@@ -147,6 +147,45 @@ describes (see [Configuration](#configuration)), and
 `datasets.check_subshower_sets(config)` says which of the config's subshower
 sets are made, with a `DatasetSource` for each that is.
 
+### Shifting subshowers
+
+A subshower is much the same wherever it falls, as the atmosphere changes
+with height but not with x and y. Moving one across the ground changes only
+which detectors it reaches, so each subshower can be used again and again,
+in other places, to augment the data. With `shift=True` the sampler moves
+every subshower it samples by a random shift in x and y before working out
+what the array sees of it:
+
+```python
+sampler = SubshowerSampler(sources, array, seed=42, shift=True)
+print(sampler.max_shift)  # metres
+
+for sample in sampler.iter_epoch(shuffle=True, detected_only=True):
+    print(sample.shift, sample.start_position, sample.total_detected_energy)
+```
+
+The shifts are spread evenly over a disc of radius `sampler.max_shift`, which
+is `detector.max_shift(array)` unless you give `max_shift` (in metres): the
+spacing of the array's detectors, the median distance from each to the
+nearest other one. That's 1.5 km for the Pierre Auger surface detector, 750 m
+for its `sd750` grid, and less for denser arrays. No point of a square or
+triangular grid is further than 0.71 of a spacing from a detector, so shifts
+of up to a spacing let a subshower land anywhere relative to the detectors,
+while it stays in the same part of the array, about as far from its shower's
+core.
+
+Each epoch draws new shifts, so the subshowers reach other detectors each
+time; for a given seed they come in the same order, with shifts or without.
+The start particle moves with the leaves, so `start_position` is where the
+shifted subshower starts and the deposits are those it makes there. Subtract
+`shift` to get back to where it was simulated, which is where the history
+still has it. `sampler.make_sample(source_number, subshower_number, shift=(dx, dy))`
+measures one subshower with a shift of your choosing.
+
+`scripts/plot_observables_from_config.py` doesn't shift subshowers: its
+ground-level observables are of the subshowers where they were simulated, and
+`ground.check_aligned` won't pair those with responses to shifted subshowers.
+
 ## Configuration
 
 `configs/default.yaml` describes where a dataset lives, which subshowers to make

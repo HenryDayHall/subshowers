@@ -17,6 +17,14 @@ Because each Reader holds a full particle history in memory, sources are
 opened lazily and evicted LRU-style, and the epoch iterator visits sources
 one at a time (shuffled) rather than hopping between files per sample.
 
+A subshower is much the same wherever it falls: the atmosphere changes
+with height, not with x and y. So with shift=True the sampler moves each
+subshower it samples across the ground, by a random shift in x and y,
+before working out what the array sees of it. Each time a subshower is
+sampled it can reach other detectors, which augments the dataset. How far
+it can move depends on the array: by default, up to the spacing of its
+detectors (see detector.max_shift).
+
 Example
 -------
 >>> from subshowers import detector
@@ -24,9 +32,9 @@ Example
 >>> array = detector.generate_pierre_auger()
 >>> sources = [DatasetSource(folder, energy_cut_value=100.0)
 ...            for folder in shower_folders]
->>> sampler = SubshowerSampler(sources, array, seed=42)
+>>> sampler = SubshowerSampler(sources, array, seed=42, shift=True)
 >>> for sample in sampler.iter_epoch(shuffle=True):
-...     print(sample.source.name, sample.total_detected_energy)
+...     print(sample.source.name, sample.shift, sample.total_detected_energy)
 """
 
 import os as _os
@@ -38,6 +46,7 @@ import numpy as _np
 import pandas as _pd
 
 from subshowers.showers import Reader as _Reader
+from subshowers import detector as _detector
 from subshowers import subshowers as _subshowers
 
 # history columns a sample is made from
@@ -63,6 +72,33 @@ def history_columns(reader, names=_SAMPLED_COLUMNS):
         return positions
 
     return columns, positions_of
+
+
+def _as_shift(shift):
+    """
+    A shift across the ground, given as (dx, dy) or (dx, dy, 0) in metres,
+    as an array of three. Subshowers only move across the ground: the
+    atmosphere changes with height, so moving one up or down would change it.
+    """
+    values = _np.array(shift, dtype=float).reshape(-1)  # a copy, kept by the sample
+    if len(values) == 2:
+        values = _np.append(values, 0.0)
+    if len(values) != 3 or values[2] != 0 or not _np.all(_np.isfinite(values)):
+        raise ValueError(
+            f"a shift is (dx, dy) in metres, across the ground, not {shift!r}"
+        )
+    return values
+
+
+def _generator_for_shifts(rng):
+    """
+    A random number generator for shifts, apart from rng, so that drawing
+    shifts doesn't change what rng draws (such as the order of an epoch).
+    """
+    try:
+        return rng.spawn(1)[0]
+    except (AttributeError, TypeError):  # older numpy, or a legacy seeding
+        return rng
 
 
 class DatasetSource:
@@ -152,7 +188,16 @@ class DatasetSource:
 
 @_dataclass
 class DetectedSample:
-    """The detected components of one subshower."""
+    """
+    The detected components of one subshower.
+
+    If the sampler shifted the subshower, start_position is where the
+    shifted subshower starts, and the deposits are those of its shifted
+    leaves. The history still holds the subshower where it was simulated:
+    add shift to the positions of its leaves there to get where they were
+    for this sample, and subtract shift from start_position to get where
+    the subshower was simulated to start.
+    """
 
     source: DatasetSource
     subshower_number: int  # index of the subshower within its source
@@ -190,6 +235,8 @@ class DetectedSample:
 
     # filled in by the sampler
     total_leaf_energy: float = 0.0
+    # how far the subshower was moved across the ground, (dx, dy, 0) in m
+    shift: _np.ndarray = _field(default_factory=lambda: _np.zeros(3))
 
 
 class SubshowerSampler:
@@ -209,6 +256,21 @@ class SubshowerSampler:
     chunk_size : int
         Leaves are pushed through detector_array.hit_any in chunks of
         this many particles, bounding the (chunk x N_detector) memory.
+    shift : bool
+        Move each subshower sampled across the ground, by a random shift in
+        x and y spread evenly over a disc of radius max_shift, before
+        working out what the array sees of it. A subshower is much the same
+        wherever it falls, so this augments the dataset: each time a
+        subshower is sampled, in each epoch, it can reach other detectors.
+        The start particle and the leaves move together, so each sample's
+        start_position is where the shifted subshower starts, and its shift
+        says how far it was moved. Shifts don't change the order subshowers
+        are drawn in, for a given seed.
+    max_shift : float, optional
+        The furthest (m) a subshower is moved, with shift. By default it's
+        detector.max_shift(detector_array), the spacing of the array's
+        detectors, which is enough for a subshower to land anywhere
+        relative to them.
     """
 
     def __init__(
@@ -218,6 +280,8 @@ class SubshowerSampler:
         seed=None,
         max_open: int = 2,
         chunk_size: int = 20_000,
+        shift: bool = False,
+        max_shift: float = None,
     ):
         if isinstance(sources, DatasetSource):
             sources = [sources]
@@ -232,6 +296,10 @@ class SubshowerSampler:
         )
         self.max_open = max(1, max_open)
         self.chunk_size = chunk_size
+        self.shift = bool(shift)
+        # how far subshowers can be moved (m); 0 without shift
+        self.max_shift = self._checked_max_shift(max_shift)
+        self._shift_rng = _generator_for_shifts(self.rng) if self.shift else None
         self._lru = _OrderedDict()
         # counting subshowers touches every source once; readers are
         # evicted again afterwards so only index lists remain resident.
@@ -265,6 +333,42 @@ class SubshowerSampler:
         previous = 0 if source_number == 0 else self._cumulative[source_number - 1]
         return source_number, int(index - previous)
 
+    # -- shifting --------------------------------------------------------
+
+    def _checked_max_shift(self, max_shift):
+        """How far subshowers can be moved (m), from the settings given."""
+        if not self.shift:
+            if max_shift is not None:
+                raise ValueError(
+                    "max_shift is the furthest subshowers are shifted,"
+                    " so it needs shift=True"
+                )
+            return 0.0
+        if max_shift is None:
+            return _detector.max_shift(self.detector_array)
+        try:
+            distance = float(max_shift)
+        except (TypeError, ValueError):
+            distance = _np.nan
+        if not (_np.isfinite(distance) and distance >= 0):
+            raise ValueError(
+                f"max_shift must be a distance in metres, at least 0, not {max_shift!r}"
+            )
+        return distance
+
+    def random_shift(self) -> _np.ndarray:
+        """
+        A shift for one subshower, (dx, dy, 0) in metres, spread evenly over
+        the disc of radius max_shift; no shift at all without shift=True.
+        """
+        if not self.shift or self.max_shift == 0:
+            return _np.zeros(3)
+        if self._shift_rng is None:  # shift was turned on after __init__
+            self._shift_rng = _generator_for_shifts(self.rng)
+        radius = self.max_shift * _np.sqrt(self._shift_rng.random())
+        angle = 2 * _np.pi * self._shift_rng.random()
+        return _np.array([radius * _np.cos(angle), radius * _np.sin(angle), 0.0])
+
     # -- building one sample -------------------------------------------
 
     @staticmethod
@@ -272,8 +376,11 @@ class SubshowerSampler:
         """The history's columns, as history_columns gives them."""
         return history_columns(reader)
 
-    def _detect(self, reader, leaf_indices):
-        """energy per detector and the indices of leaves that hit."""
+    def _detect(self, reader, leaf_indices, shift=None):
+        """
+        energy per detector and the indices of leaves that hit, with the
+        leaves moved by shift, (dx, dy, 0), if it's given.
+        """
         n_detectors = len(self.detector_array)
         energy_per_detector = _np.zeros(n_detectors)
         detected = []
@@ -285,6 +392,9 @@ class SubshowerSampler:
             start_positions = _np.stack(
                 [columns[c][positions] for c in ["x", "y", "z"]], axis=-1
             )
+            if shift is not None:
+                # a new array, so the history itself isn't moved
+                start_positions = start_positions + shift
             directions = _np.stack(
                 [columns[c][positions] for c in ["px", "py", "pz"]], axis=-1
             )
@@ -294,15 +404,28 @@ class SubshowerSampler:
             detected.append(chunk[hits.any(axis=-1)])
         return energy_per_detector, _np.concatenate(detected)
 
-    def make_sample(self, source_number: int, subshower_number: int) -> DetectedSample:
+    def make_sample(
+        self, source_number: int, subshower_number: int, shift=None
+    ) -> DetectedSample:
+        """
+        What the array sees of one subshower, moved across the ground by
+        shift, (dx, dy) in metres, if it's given. Otherwise it's moved by a
+        random_shift, which is no shift at all without shift=True.
+        """
         source = self._checkout(self.sources[source_number])
         start_index, leaf_indices = source[subshower_number]
         reader = source.reader
-        energy_per_detector, detected_leaves = self._detect(reader, leaf_indices)
+        shift = self.random_shift() if shift is None else _as_shift(shift)
+        shifted = bool(shift.any())
+        energy_per_detector, detected_leaves = self._detect(
+            reader, leaf_indices, shift if shifted else None
+        )
         columns, positions_of = self._columns(reader)
         start = int(_np.atleast_1d(positions_of(start_index))[0])
         start_kinetic_energy = float(columns["kinetic_energy"][start])
         start_position = _np.array([columns[c][start] for c in ["x", "y", "z"]])
+        if shifted:
+            start_position = start_position + shift
         start_direction = _np.array([columns[c][start] for c in ["px", "py", "pz"]])
         total_leaf_energy = float(
             _np.sum(columns["kinetic_energy"][positions_of(leaf_indices)])
@@ -320,6 +443,7 @@ class SubshowerSampler:
             energy_per_detector=energy_per_detector,
             detected_leaf_indices=detected_leaves,
             total_leaf_energy=total_leaf_energy,
+            shift=shift,
         )
         return sample
 
@@ -335,7 +459,9 @@ class SubshowerSampler:
         Sources are visited one after another (in shuffled order if
         requested) and subshowers shuffled within each source, so at most
         one history has to be resident per step.  With detected_only,
-        subshowers that miss the array entirely are skipped.
+        subshowers that miss the array entirely are skipped. With shift,
+        each epoch moves every subshower by a new shift, and those that
+        miss the array are the ones that miss it where they're moved to.
         """
         source_order = _np.arange(len(self.sources))
         if shuffle:
@@ -376,6 +502,11 @@ class SubshowerSampler:
                         random_min = random_source.reader.data[coord].min()
                         random_max = random_source.reader.data[coord].max()
                         range_description += f"\n{coord}: {detector_min} to {detector_max}, {random_min} to {random_max}"
+                    if self.shift:
+                        range_description += (
+                            "\nThe subshowers are shifted across the ground"
+                            f" by up to {self.max_shift:.6g} m."
+                        )
 
                     _warnings.warn(
                         f"We have skipped {sequential_skips} sequential subshowers"

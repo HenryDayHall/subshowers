@@ -2,7 +2,9 @@
 Demo of subshowers.sampling.SubshowerSampler.
 
 1. Builds two DatasetSources (two shower folders, subshowers from an
-   energy cut) and one detector array.
+   energy cut) and one detector array. The sampler shifts each subshower
+   across the ground, by up to the spacing of the array's detectors, so
+   each time it's sampled it reaches other detectors (see the README).
 2. Plots the detected portion of a few randomly sampled subshowers, in
    the style of the final cell of scripts/ViewDetectorArrays.ipynb
    (detector centres coloured by deposited energy, LogNorm, zoomed to
@@ -62,8 +64,11 @@ for name, (seed, energy, height) in specs.items():
 
 array = detector.generate_pierre_auger()
 sources = [DatasetSource(folder, energy_cut_value=ENERGY_CUT) for folder in FOLDERS]
-sampler = SubshowerSampler(sources, array, seed=42, max_open=2)
-print(f"Sampler covers {len(sampler)} subshowers over {len(sources)} datasets")
+sampler = SubshowerSampler(sources, array, seed=42, max_open=2, shift=True)
+print(
+    f"Sampler covers {len(sampler)} subshowers over {len(sources)} datasets,"
+    f" shifted across the ground by up to {sampler.max_shift:.0f} m"
+)
 
 
 # --------------------------------------------- plotting as in the notebook
@@ -76,8 +81,10 @@ def plot_sample(sample, ax, pad_factor=2.5):
         axis=ax,
         initial_position=sample.start_position,
     )
-    plt.title(
-        f"{sample.source.name}  start KE {sample.start_kinetic_energy:.3g} GeV\n"
+    dx, dy, _ = sample.shift
+    ax.set_title(
+        f"{sample.source.name}  start KE {sample.start_kinetic_energy:.3g} GeV,"
+        f" shifted ({dx:.0f}, {dy:.0f}) m\n"
         f"{sample.n_detected_leaves}/{sample.n_leaves} leaves detected, "
         f"{sample.n_hit_detectors} detectors, "
         f"E_det {sample.total_detected_energy:.3g} GeV",
