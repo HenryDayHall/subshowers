@@ -336,7 +336,9 @@ def dataset(tmp_path_factory):
     source = DatasetSource(
         folder, output_path=os.path.join(folder, "subshowers_e100.0.h5"), name="e1e5_0"
     )
-    samples = list(SubshowerSampler([source], array, seed=1).iter_epoch())
+    # where they were simulated, as the ground summaries have them
+    sampler = SubshowerSampler([source], array, seed=1, shift=False)
+    samples = list(sampler.iter_epoch())
     return source, array, Responses.from_samples(samples, len(array))
 
 
@@ -387,6 +389,24 @@ def test_from_source(dataset):
         ground.check_aligned(reordered, responses)
     with pytest.raises(ValueError, match="responses"):
         ground.check_aligned(summaries.select(slice(1, None)), responses)
+
+
+def test_shifted_responses_not_aligned(dataset):
+    """
+    Responses to subshowers the sampler shifted across the ground don't go
+    with summaries of them where they were simulated, as the signal about
+    each one's axis would be measured about the wrong place.
+    """
+    source, array, responses = dataset
+    sampler = SubshowerSampler([source], array, seed=1)  # shifting, by default
+    shifted = Responses.from_samples(sampler.iter_epoch(), len(array))
+    numbers = shifted.values["subshower_number"]
+    # the same subshowers, in the same order
+    np.testing.assert_array_equal(numbers, responses.values["subshower_number"])
+    summaries = GroundSummaries.from_source(source, numbers)
+    ground.check_aligned(summaries, responses)
+    with pytest.raises(ValueError, match="shifted"):
+        ground.check_aligned(summaries, shifted)
 
 
 # ------------------------------------------------------------- detectors

@@ -122,7 +122,8 @@ be moved as long as histories and outputs move together.
 `subshowers.detector` builds arrays of sensitive regions (for example
 `generate_pierre_auger()` or `generate_at_ground(...)`) and answers whether
 particle tracks intersect them. `sampling` puts the pieces together and hands
-back one `DetectedSample` per subshower:
+back one `DetectedSample` per subshower, moved across the ground at random
+first (see [Shifting subshowers](#shifting-subshowers)):
 
 ```python
 from subshowers import detector
@@ -146,6 +147,52 @@ draws uniformly across all of them at the cost of more reloading.
 describes (see [Configuration](#configuration)), and
 `datasets.check_subshower_sets(config)` says which of the config's subshower
 sets are made, with a `DatasetSource` for each that is.
+
+### Shifting subshowers
+
+A subshower is much the same wherever it falls, as the atmosphere changes
+with height but not with x and y. Moving one across the ground changes only
+which detectors it reaches, so each subshower can be used again and again,
+in other places, to augment the data. So unless given `shift=False`, the
+sampler moves every subshower it samples by a random shift in x and y before
+working out what the array sees of it:
+
+```python
+sampler = SubshowerSampler(sources, array, seed=42)
+print(sampler.max_shift)  # metres
+
+for sample in sampler.iter_epoch(shuffle=True, detected_only=True):
+    print(sample.shift, sample.start_position, sample.total_detected_energy)
+```
+
+The shifts are spread evenly over a disc of radius `sampler.max_shift`, which
+is `detector.max_shift(array)` unless you give `max_shift` (in metres): half
+the width of the array, where the width is how far apart its two furthest
+detectors are. That's 37 km for the Pierre Auger surface detector (73 km
+wide), 3.8 km for its `sd750` grid, and 950 m for the array in
+`configs/default.yaml`, so a subshower near the middle of the array can be
+moved to almost anywhere over it. To keep subshowers near where they were
+simulated instead, give `max_shift=detector.spacing(array)`, the usual
+distance between neighbouring detectors: no point of a square or triangular
+grid is further than 0.71 of a spacing from a detector, so that's still
+enough for a subshower to land anywhere relative to them.
+
+Each epoch draws new shifts, so the subshowers reach other detectors each
+time; for a given seed they come in the same order, with shifts or without.
+The start particle moves with the leaves, so `start_position` is where the
+shifted subshower starts and the deposits are those it makes there. Subtract
+`shift` to get back to where it was simulated, which is where the history
+still has it. `sampler.make_sample(source_number, subshower_number, shift=(dx, dy))`
+measures one subshower with a shift of your choosing.
+
+Spread over a sparse array like Pierre Auger's, most subshowers miss every
+detector, so `detected_only` passes over most of them. `iter_random` warns
+when 100 in a row have missed, in case the array isn't where the subshowers
+come down, and again at 1000, 10 000 and so on, rather than every 100.
+
+`scripts/plot_observables_from_config.py` doesn't shift subshowers: its
+ground-level observables are of the subshowers where they were simulated, and
+`ground.check_aligned` won't pair those with responses to shifted subshowers.
 
 ## Configuration
 

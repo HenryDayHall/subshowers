@@ -804,7 +804,11 @@ class GroundSummaries:
 def check_aligned(summaries, responses):
     """
     Raise ValueError unless a GroundSummaries and a responses.Responses are
-    of the same subshowers, in the same order.
+    of the same subshowers, in the same order, starting in the same places:
+    the detector signal about each subshower's axis needs its deposits
+    measured where the summary has it, so not shifted across the ground (as
+    sampling.SubshowerSampler does, unless given shift=False) for one and
+    not the other.
     """
     if len(summaries) != len(responses):
         raise ValueError(
@@ -818,6 +822,17 @@ def check_aligned(summaries, responses):
     ):
         raise ValueError(
             "the ground summaries and responses are of different subshowers"
+        )
+    if not np.allclose(
+        summaries.values["start_position"],
+        responses.values["start_position"],
+        rtol=0.0,
+        atol=1e-6,
+        equal_nan=True,
+    ):
+        raise ValueError(
+            "the ground summaries and responses have subshowers starting in"
+            " different places, as if the responses were of shifted subshowers"
         )
 
 
